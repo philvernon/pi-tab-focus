@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { stripTerminalSequences } from "@earendil-works/pi-tui";
+import {
+  CURSOR_MARKER,
+  stripTerminalSequences,
+  visibleWidth,
+} from "@earendil-works/pi-tui";
 import transcriptFocus from "./index.ts";
 
 type Handler = (...args: any[]) => any;
@@ -15,6 +19,7 @@ type HarnessOptions = {
   viewportHeight?: number;
   paddedPrompts?: boolean;
   extraKinds?: boolean;
+  replyText?: string;
 };
 
 class FakeContainer {
@@ -131,10 +136,17 @@ class SkillInvocationMessageComponent extends FakeText {}
 class CompactionSummaryMessageComponent extends FakeText {}
 class CustomMessageComponent extends FakeText {}
 
-function createTranscriptTree(paddedPrompts = false, extraKinds = false) {
+function createTranscriptTree(
+  paddedPrompts = false,
+  extraKinds = false,
+  replyText = "hi, how can i help?",
+) {
   const prompt = new UserMessageComponent("hello", paddedPrompts);
-  const reply = new AssistantMessageComponent("hi, how can i help?");
-  const updatePrompt = new UserMessageComponent("update the file", paddedPrompts);
+  const reply = new AssistantMessageComponent(replyText);
+  const updatePrompt = new UserMessageComponent(
+    "update the file",
+    paddedPrompts,
+  );
   const invisibleToolAssistant = new AssistantMessageComponent();
   const glob = new ToolExecutionComponent(
     "tool-glob",
@@ -195,9 +207,12 @@ function createHarness(options: HarnessOptions = {}) {
   const focusHistory: unknown[] = [];
   const scrollBy: number[] = [];
   const scrollTo: number[] = [];
+  const openedUrls: string[] = [];
   let scrollTopCalls = 0;
   let scrollBottomCalls = 0;
-  let terminalHandler: ((data: string) => { consume?: boolean } | undefined) | undefined;
+  let terminalHandler:
+    | ((data: string) => { consume?: boolean } | undefined)
+    | undefined;
   let editorFactory: Handler | undefined;
   let focusedComponent: unknown = null;
   let overlay = false;
@@ -210,6 +225,7 @@ function createHarness(options: HarnessOptions = {}) {
   const transcript = createTranscriptTree(
     options.paddedPrompts ?? false,
     options.extraKinds ?? false,
+    options.replyText,
   );
 
   const editor = {
@@ -223,6 +239,53 @@ function createHarness(options: HarnessOptions = {}) {
     getMode() {
       return "normal";
     },
+  };
+
+  const sliceByColumns = (line: string, start: number, end: number): string => {
+    const stripped = stripTerminalSequences(line);
+    const segmenter = new Intl.Segmenter(undefined, {
+      granularity: "grapheme",
+    });
+    let col = 0;
+    let text = "";
+    for (const segment of segmenter.segment(stripped)) {
+      const width = visibleWidth(segment.segment);
+      const next = col + width;
+      if (next > start && col < end) text += segment.segment;
+      col = next;
+    }
+    return text.trimEnd();
+  };
+
+  const scrollContentLines = (): string[] => transcript.document.render(99);
+
+  const activeSelectionText = (
+    selectionAnchor?: any,
+    selectionFocus?: any,
+  ): string | undefined => {
+    if (!selectionAnchor || !selectionFocus) return undefined;
+    const anchorBeforeFocus =
+      selectionAnchor.row < selectionFocus.row ||
+      (selectionAnchor.row === selectionFocus.row &&
+        selectionAnchor.col < selectionFocus.col);
+    if (
+      selectionAnchor.row === selectionFocus.row &&
+      selectionAnchor.col === selectionFocus.col
+    )
+      return undefined;
+    const start = anchorBeforeFocus ? selectionAnchor : selectionFocus;
+    const end = anchorBeforeFocus ? selectionFocus : selectionAnchor;
+    const lines = scrollContentLines();
+    const selected: string[] = [];
+    for (let row = start.row; row <= end.row; row++) {
+      const line = lines[row] ?? "";
+      const width = visibleWidth(stripTerminalSequences(line));
+      const from = row === start.row ? start.col : 0;
+      const to = row === end.row ? Math.min(end.col, width) : width;
+      selected.push(sliceByColumns(line, from, to));
+    }
+    const text = selected.join("\n");
+    return text.length > 0 ? text : undefined;
   };
 
   const maxScrollTop = 7;
@@ -298,12 +361,38 @@ function createHarness(options: HarnessOptions = {}) {
     invalidate() {
       invalidations++;
     },
+    selectionAnchor: undefined as any,
+    selectionFocus: undefined as any,
+    selectionGranularity: "character" as const,
+    selectionInitialRange: undefined as any,
+    clearTextSelection() {
+      this.selectionAnchor = undefined;
+      this.selectionFocus = undefined;
+      this.selectionGranularity = "character";
+      this.selectionInitialRange = undefined;
+    },
+    getSelectionSourceLine(point: { row: number }) {
+      return scrollContentLines()[point.row] ?? "";
+    },
+    async copyActiveSelectionToClipboard() {
+      const text = activeSelectionText(
+        this.selectionAnchor,
+        this.selectionFocus,
+      );
+      if (!text) return false;
+      copiedTexts.push(text);
+      return true;
+    },
+    openUrl(url: string) {
+      openedUrls.push(url);
+    },
     requestRender() {
       renderRequests++;
     },
   };
 
-  const previousFactory = options.withEditor === false ? undefined : () => editor;
+  const previousFactory =
+    options.withEditor === false ? undefined : () => editor;
   const ctx = {
     ui: {
       getEditorComponent: () => previousFactory,
@@ -338,28 +427,39 @@ function createHarness(options: HarnessOptions = {}) {
   );
 
   const start = () => {
-    handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, ctx);
+    handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      ctx,
+    );
     if (editorFactory) {
-      const installedEditor = editorFactory(tui, {}, {
-        matches(data: string, action: string) {
-          return (
-            (action === "app.tools.expand" && data === "\x0f") ||
-            (action === "app.thinking.toggle" && data === "\x14")
-          );
+      const installedEditor = editorFactory(
+        tui,
+        {},
+        {
+          matches(data: string, action: string) {
+            return (
+              (action === "app.tools.expand" && data === "\x0f") ||
+              (action === "app.thinking.toggle" && data === "\x14")
+            );
+          },
         },
-      });
+      );
       focusedComponent = installedEditor;
     }
   };
 
   const input = (data: string) => {
     const result = terminalHandler?.(data);
-    if (!result?.consume && focusedComponent === editor) editor.handleInput(data);
+    if (!result?.consume && focusedComponent === editor)
+      editor.handleInput(data);
     return result;
   };
 
   const shutdown = () => {
-    handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, ctx);
+    handlers.get("session_shutdown")?.(
+      { type: "session_shutdown", reason: "quit" },
+      ctx,
+    );
   };
 
   const emit = (event: string) => {
@@ -374,7 +474,8 @@ function createHarness(options: HarnessOptions = {}) {
     for (const child of transcript.chat.children) {
       const lines = child.render(width);
       const visibleIndex = lines.findIndex(
-        (candidate: string) => stripTerminalSequences(candidate).trim().length > 0,
+        (candidate: string) =>
+          stripTerminalSequences(candidate).trim().length > 0,
       );
       if (child === component) {
         if (visibleIndex < 0) return "";
@@ -388,6 +489,22 @@ function createHarness(options: HarnessOptions = {}) {
     }
 
     return "";
+  };
+
+  const visualRenderedLine = (row: number): string => {
+    const findScrollNode = (component: any): any => {
+      const node = component?.[LAYOUT_NODE]?.();
+      if (node?.type === "scroll") return node;
+      if (node?.type === "vstack" || node?.type === "hstack") {
+        for (const entry of node.entries) {
+          const found = findScrollNode(entry.component);
+          if (found) return found;
+        }
+      }
+      return undefined;
+    };
+    const scrollNode = findScrollNode(layoutRoot);
+    return scrollNode?.component?.render?.(99)?.[row] ?? "";
   };
 
   const renderedFirstVisibleLine = (component: FakeText): string => {
@@ -405,8 +522,10 @@ function createHarness(options: HarnessOptions = {}) {
     focusHistory,
     input,
     notifications,
+    openedUrls,
     renderedFirstVisibleLine,
     renderedTranscriptLine,
+    visualRenderedLine,
     scrollBy,
     scrollTo,
     setOverlay(value: boolean) {
@@ -429,6 +548,15 @@ function createHarness(options: HarnessOptions = {}) {
     },
     privateScrollView,
     originalLayoutRoot,
+    selectionText() {
+      return activeSelectionText(tui.selectionAnchor, tui.selectionFocus);
+    },
+    selectionAnchor() {
+      return tui.selectionAnchor;
+    },
+    selectionFocus() {
+      return tui.selectionFocus;
+    },
     get layoutRoot() {
       return layoutRoot;
     },
@@ -557,14 +685,32 @@ test("permanent gutter lives in the fullscreen layout without wrapping transcrip
   // The fullscreen root is replaced with a gutter + scroll-layout composition,
   // while the transcript container and every item keep their original renderers.
   assert.notEqual(h.layoutRoot, h.originalLayoutRoot);
-  assert.equal(Object.prototype.hasOwnProperty.call(h.transcript.chat, "render"), false);
-  assert.equal(Object.prototype.hasOwnProperty.call(h.transcript.reply, "render"), false);
-  assert.equal(Object.prototype.hasOwnProperty.call(h.transcript.prompt, "render"), false);
-  assert.equal(Object.prototype.hasOwnProperty.call(h.transcript.glob, "render"), false);
-  assert.equal(Object.prototype.hasOwnProperty.call(h.transcript.edit, "render"), false);
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(h.transcript.chat, "render"),
+    false,
+  );
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(h.transcript.reply, "render"),
+    false,
+  );
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(h.transcript.prompt, "render"),
+    false,
+  );
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(h.transcript.glob, "render"),
+    false,
+  );
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(h.transcript.edit, "render"),
+    false,
+  );
 
   h.input("\t");
-  assert.equal(Object.prototype.hasOwnProperty.call(h.transcript.reply, "render"), false);
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(h.transcript.reply, "render"),
+    false,
+  );
 });
 
 test("scrolling up follows the bottom viewport edge and auto-selects user prompts", () => {
@@ -655,7 +801,11 @@ test("Shift navigation selects every rendered prompt, message and tool item in o
 });
 
 test("remaining selectable transcript kinds are classified and navigable", () => {
-  const h = createHarness({ extraKinds: true, initialScrollTop: 0, viewportHeight: 100 });
+  const h = createHarness({
+    extraKinds: true,
+    initialScrollTop: 0,
+    viewportHeight: 100,
+  });
   h.start();
   h.input("\t");
 
@@ -666,6 +816,116 @@ test("remaining selectable transcript kinds are classified and navigable", () =>
   assert.match(h.statuses.get("pi-tab-focus") ?? "", /skill 8\/10/);
   h.input("K");
   assert.match(h.statuses.get("pi-tab-focus") ?? "", /bash 7\/10/);
+});
+
+test("visual mode starts in navigation without a text selection", () => {
+  const h = createHarness({ initialScrollTop: 0 });
+  h.start();
+  h.input("\t");
+
+  assert.deepEqual(h.input("v"), { consume: true });
+  assert.match(h.statuses.get("pi-tab-focus") ?? "", /^VISUAL NAV/);
+  assert.equal(h.selectionText(), undefined);
+  assert.match(h.visualRenderedLine(3), new RegExp(CURSOR_MARKER));
+  assert.doesNotMatch(h.renderedFirstVisibleLine(h.transcript.reply), /^│/);
+
+  h.input("y");
+  assert.deepEqual(h.copiedTexts, []);
+  assert.match(h.notifications.at(-1)?.message ?? "", /Press V/);
+  assert.match(h.statuses.get("pi-tab-focus") ?? "", /^VISUAL NAV/);
+});
+
+test("V starts selecting from the visual cursor", async () => {
+  const h = createHarness({ initialScrollTop: 0 });
+  h.start();
+  h.input("\t");
+  h.input("v");
+  h.input("l");
+
+  assert.equal(h.selectionText(), undefined);
+  h.input("V");
+  assert.match(h.statuses.get("pi-tab-focus") ?? "", /^VISUAL SELECT/);
+  assert.equal(h.selectionText(), "i");
+
+  h.input("y");
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(h.copiedTexts, ["i"]);
+  assert.match(h.statuses.get("pi-tab-focus") ?? "", /^TRANSCRIPT/);
+  assert.match(h.renderedFirstVisibleLine(h.transcript.reply), /^│/);
+});
+
+test("visual h/l and j/k update native text selection", () => {
+  const h = createHarness({ initialScrollTop: 0, viewportHeight: 4 });
+  h.start();
+  h.input("\t");
+  h.input("v");
+  h.input("V");
+
+  h.input("l");
+  assert.equal(h.selectionText(), "hi");
+
+  h.input("h");
+  assert.equal(h.selectionText(), "h");
+
+  h.input("j");
+  assert.equal(h.selectionText(), "hi, how can i help?\n");
+
+  h.input("j");
+  assert.equal(h.selectionText(), "hi, how can i help?\n\n u");
+  assert.match(h.statuses.get("pi-tab-focus") ?? "", /prompt 3\/6/);
+});
+
+test("visual line motions select rendered-line columns", () => {
+  const h = createHarness({ initialScrollTop: 0 });
+  h.start();
+  h.input("\t");
+  h.input("v");
+  h.input("V");
+
+  h.input("$");
+  assert.equal(h.selectionText(), "hi, how can i help?");
+
+  h.input("0");
+  assert.equal(h.selectionText(), " h");
+
+  h.input("^");
+  assert.equal(h.selectionText(), "h");
+});
+
+test("visual cleanup keys clear native selection", () => {
+  const h = createHarness({ initialScrollTop: 0 });
+  h.start();
+  h.input("\t");
+  h.input("v");
+  h.input("V");
+  assert.equal(h.selectionText(), "h");
+
+  h.input("\x1b");
+  assert.equal(h.selectionText(), undefined);
+  assert.match(h.statuses.get("pi-tab-focus") ?? "", /^TRANSCRIPT/);
+  assert.equal(h.focusedComponent, null);
+
+  h.input("\x1b");
+  assert.equal(h.focusedComponent, h.editor);
+});
+
+test("Enter follows literal transcript links", () => {
+  const h = createHarness({
+    initialScrollTop: 0,
+    replyText: "see https://example.com/path",
+  });
+  h.start();
+  h.input("\t");
+
+  h.input("\r");
+  assert.deepEqual(h.openedUrls, ["https://example.com/path"]);
+
+  h.input("v");
+  h.input("\r");
+  assert.deepEqual(h.openedUrls, [
+    "https://example.com/path",
+    "https://example.com/path",
+  ]);
 });
 
 test("copy mappings copy the selected item's unhighlighted rendered text", () => {
@@ -708,15 +968,22 @@ test("selection adds one blank gutter row above and below visible item content",
   assert.equal(promptLines[3], "┃");
   assert.equal(promptLines[4], "");
 
-  const assistantHarness = createHarness({ initialScrollTop: 0, viewportHeight: 4 });
+  const assistantHarness = createHarness({
+    initialScrollTop: 0,
+    viewportHeight: 4,
+  });
   assistantHarness.start();
   assistantHarness.input("\t");
 
-  assert.match(assistantHarness.statuses.get("pi-tab-focus") ?? "", /message 2\/6/);
+  assert.match(
+    assistantHarness.statuses.get("pi-tab-focus") ?? "",
+    /message 2\/6/,
+  );
 
-  const assistantGutter = assistantHarness.layoutRoot?.children?.[0]?.children?.[0];
-  const assistantLines = (assistantGutter?.render?.(1) ?? []).map((line: string) =>
-    stripTerminalSequences(line),
+  const assistantGutter =
+    assistantHarness.layoutRoot?.children?.[0]?.children?.[0];
+  const assistantLines = (assistantGutter?.render?.(1) ?? []).map(
+    (line: string) => stripTerminalSequences(line),
   );
 
   assert.equal(assistantLines[1], "");

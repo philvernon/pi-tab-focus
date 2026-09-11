@@ -3,13 +3,17 @@ import {
   type ExtensionAPI,
 } from "@earendil-works/pi-coding-agent";
 import {
+  CURSOR_MARKER,
   HStack,
   Key,
   VStack,
   isKeyRelease,
   isKeyRepeat,
   matchesKey,
+  getOsc8LinkAtColumn,
+  sliceByColumn,
   stripTerminalSequences,
+  visibleWidth,
   type Component,
   type EditorComponent,
   type TUI,
@@ -29,9 +33,22 @@ type ClipboardWriter = (text: string) => Promise<void>;
 type PrivateScrollView = Component & {
   scrollTop: number;
   viewportHeight: number;
+  contentHeight?: number;
   primary?: boolean;
   getContentWidth?: (width: number) => number;
   scrollTo?: (scrollTop: number, options?: { disableFollow?: boolean }) => void;
+};
+
+type NativeSelectionPoint = {
+  row: number;
+  col: number;
+  scrollView?: PrivateScrollView;
+  boundary?: boolean;
+};
+
+type NativeSelectionRange = {
+  start: NativeSelectionPoint;
+  end: NativeSelectionPoint;
 };
 
 type FullscreenTui = TUI & {
@@ -40,6 +57,7 @@ type FullscreenTui = TUI & {
   scrollToTop?: () => void;
   scrollToBottom?: () => void;
   setLayoutRoot?: (component: Component | undefined) => void;
+  getFocusedComponent?: () => Component | null;
   // Both fields are private in TuiAltScreen's public type. Access is guarded and
   // limited to fullscreen transcript layout/viewport integration.
   layoutRoot?: Component;
@@ -47,6 +65,14 @@ type FullscreenTui = TUI & {
     root?: { component: Component };
     primaryScrollView?: PrivateScrollView;
   };
+  selectionAnchor?: NativeSelectionPoint;
+  selectionFocus?: NativeSelectionPoint;
+  selectionGranularity?: "character" | "word" | "line";
+  selectionInitialRange?: NativeSelectionRange;
+  clearTextSelection?: () => void;
+  getSelectionSourceLine?: (point: NativeSelectionPoint) => string;
+  copyActiveSelectionToClipboard?: () => Promise<boolean>;
+  openUrl?: (url: string) => void;
 };
 
 type ComponentWithChildren = Component & {
@@ -106,11 +132,25 @@ type TranscriptLayoutInstallation = {
   gutter: TranscriptGutterComponent;
 };
 
+type VisualPoint = {
+  row: number;
+  col: number;
+};
+
+type GraphemeColumn = {
+  start: number;
+  end: number;
+  text: string;
+};
+
 const LAYOUT_NODE = Symbol.for("@earendil-works/pi-tui/layout-node");
 const TRANSCRIPT_GUTTER_WIDTH = 1;
 const PROMPT_SELECTION_MARKER = "\x1b[38;2;255;121;198m┃\x1b[39m";
 const RESPONSE_SELECTION_MARKER = "\x1b[38;2;92;196;147m┃\x1b[39m";
-const TRANSCRIPT_LAYOUT_ACTIONS = ["app.tools.expand", "app.thinking.toggle"] as const;
+const TRANSCRIPT_LAYOUT_ACTIONS = [
+  "app.tools.expand",
+  "app.thinking.toggle",
+] as const;
 
 const TRANSCRIPT_COMPONENT_KINDS: Record<string, TranscriptItemKind> = {
   UserMessageComponent: "prompt",
@@ -125,10 +165,14 @@ const TRANSCRIPT_COMPONENT_KINDS: Record<string, TranscriptItemKind> = {
 };
 
 function componentName(component: Component): string {
-  return (component as { constructor?: { name?: string } }).constructor?.name ?? "";
+  return (
+    (component as { constructor?: { name?: string } }).constructor?.name ?? ""
+  );
 }
 
-function transcriptItemKind(component: Component): TranscriptItemKind | undefined {
+function transcriptItemKind(
+  component: Component,
+): TranscriptItemKind | undefined {
   return TRANSCRIPT_COMPONENT_KINDS[componentName(component)];
 }
 
@@ -138,10 +182,16 @@ function componentChildren(component: Component): Component[] {
 }
 
 function trimRenderedText(lines: string[]): string {
-  const textLines = lines.map((line) => stripTerminalSequences(line).replace(/\s+$/u, ""));
+  const textLines = lines.map((line) =>
+    stripTerminalSequences(line).replace(/\s+$/u, ""),
+  );
 
-  while (textLines.length > 0 && textLines[0].trim().length === 0) textLines.shift();
-  while (textLines.length > 0 && textLines[textLines.length - 1].trim().length === 0) {
+  while (textLines.length > 0 && textLines[0].trim().length === 0)
+    textLines.shift();
+  while (
+    textLines.length > 0 &&
+    textLines[textLines.length - 1].trim().length === 0
+  ) {
     textLines.pop();
   }
 
@@ -153,12 +203,15 @@ function trimRenderedText(lines: string[]): string {
   return textLines.map((line) => line.slice(commonIndent)).join("\n");
 }
 
-function visibleLineBounds(lines: string[]): { first: number; last: number } | undefined {
+function visibleLineBounds(
+  lines: string[],
+): { first: number; last: number } | undefined {
   let first = -1;
   let last = -1;
 
   for (let index = 0; index < lines.length; index++) {
-    if (stripTerminalSequences(lines[index] ?? "").trim().length === 0) continue;
+    if (stripTerminalSequences(lines[index] ?? "").trim().length === 0)
+      continue;
     if (first < 0) first = index;
     last = index;
   }
@@ -182,24 +235,77 @@ function semanticItemBaseKey(
 ): string {
   if (kind === "tool") {
     const toolCallId = (component as { toolCallId?: unknown }).toolCallId;
-    if (typeof toolCallId === "string" && toolCallId.length > 0) return `tool:${toolCallId}`;
+    if (typeof toolCallId === "string" && toolCallId.length > 0)
+      return `tool:${toolCallId}`;
   }
 
   return `${kind}:${hashText(text)}`;
 }
 
-function privateLayoutNode(component: Component): PrivateLayoutNode | undefined {
+function privateLayoutNode(
+  component: Component,
+): PrivateLayoutNode | undefined {
+  // SAFETY: Pi stores private layout hooks under this symbol on component objects;
+  // structural access is guarded by checking the value is callable before use.
   const getter = (component as unknown as Record<symbol, unknown>)[LAYOUT_NODE];
   return typeof getter === "function"
     ? (getter.call(component) as PrivateLayoutNode | undefined)
     : undefined;
 }
 
+class VisualCursorContentProxy implements Component {
+  private readonly component: Component;
+  private readonly getCursor: () => VisualPoint | undefined;
+
+  constructor(component: Component, getCursor: () => VisualPoint | undefined) {
+    this.component = component;
+    this.getCursor = getCursor;
+  }
+
+  render(width: number): string[] {
+    const lines = this.component.render(width);
+    const cursor = this.getCursor();
+    if (!cursor) return lines;
+
+    const line = lines[cursor.row] ?? "";
+    const lineWidth = visibleWidth(line);
+    const col = Math.max(0, Math.min(cursor.col, lineWidth));
+    const before = sliceByColumn(line, 0, col, true);
+    const atCursor =
+      col >= lineWidth
+        ? " "
+        : sliceByColumn(
+            line,
+            col,
+            Math.max(1, visibleWidth(sliceByColumn(line, col, 1, true))),
+            true,
+          );
+    const after = sliceByColumn(
+      line,
+      col + visibleWidth(atCursor),
+      Math.max(0, lineWidth - col - visibleWidth(atCursor)),
+      true,
+    );
+    lines[cursor.row] =
+      `${before}${CURSOR_MARKER}\x1b[7m${atCursor}\x1b[27m${after}`;
+    return lines;
+  }
+
+  invalidate(): void {
+    this.component.invalidate?.();
+  }
+}
+
 class ScrollLayoutProxy implements Component {
   private readonly scrollView: PrivateScrollView;
+  private readonly getCursor: () => VisualPoint | undefined;
 
-  constructor(scrollView: PrivateScrollView) {
+  constructor(
+    scrollView: PrivateScrollView,
+    getCursor: () => VisualPoint | undefined,
+  ) {
     this.scrollView = scrollView;
+    this.getCursor = getCursor;
   }
 
   render(_width: number): string[] {
@@ -214,7 +320,12 @@ class ScrollLayoutProxy implements Component {
   }
 
   [LAYOUT_NODE](): PrivateLayoutNode | undefined {
-    return privateLayoutNode(this.scrollView);
+    const node = privateLayoutNode(this.scrollView);
+    if (!node || node.type !== "scroll") return node;
+    return {
+      ...node,
+      component: new VisualCursorContentProxy(node.component, this.getCursor),
+    };
   }
 }
 
@@ -251,7 +362,9 @@ class TranscriptGutterComponent implements Component {
     if (first >= last) return lines;
 
     const marker =
-      this.selected.kind === "prompt" ? PROMPT_SELECTION_MARKER : RESPONSE_SELECTION_MARKER;
+      this.selected.kind === "prompt"
+        ? PROMPT_SELECTION_MARKER
+        : RESPONSE_SELECTION_MARKER;
 
     for (let row = first; row < last; row++) lines[row] = marker;
     return lines;
@@ -354,9 +467,18 @@ export default function transcriptFocus(
     let exDetour = false;
     let exReturnArmed = false;
     let exReturnCheck: ReturnType<typeof setTimeout> | undefined;
+    let visualAnchor: VisualPoint | undefined;
+    let visualHead: VisualPoint | undefined;
+    let visualPreferredCol: number | undefined;
+    let visualWidth: number | undefined;
 
     const activeScrollView = (): PrivateScrollView | undefined =>
       transcriptLayout?.scrollView ?? tui?.currentLayout?.primaryScrollView;
+
+    const inVisualMode = (): boolean => Boolean(visualHead);
+
+    const isVisualSelecting = (): boolean =>
+      Boolean(visualAnchor && visualHead);
 
     const transcriptWidth = (): number => {
       if (!tui) return 1;
@@ -364,8 +486,85 @@ export default function transcriptFocus(
         1,
         tui.terminal.columns - (transcriptLayout ? TRANSCRIPT_GUTTER_WIDTH : 0),
       );
-      return activeScrollView()?.getContentWidth?.(terminalWidth) ?? terminalWidth;
+      return (
+        activeScrollView()?.getContentWidth?.(terminalWidth) ?? terminalWidth
+      );
     };
+
+    const nativeSelectionPoint = (
+      point: VisualPoint,
+    ): NativeSelectionPoint => ({
+      ...point,
+      scrollView: activeScrollView(),
+    });
+
+    const sourceLine = (row: number): string =>
+      tui?.getSelectionSourceLine?.(nativeSelectionPoint({ row, col: 0 })) ??
+      "";
+
+    const graphemeColumns = (line: string): GraphemeColumn[] => {
+      const stripped = stripTerminalSequences(line);
+      const segmenter = new Intl.Segmenter(undefined, {
+        granularity: "grapheme",
+      });
+      const columns: GraphemeColumn[] = [];
+      let col = 0;
+
+      for (const segment of segmenter.segment(stripped)) {
+        const width = Math.max(0, visibleWidth(segment.segment));
+        columns.push({ start: col, end: col + width, text: segment.segment });
+        col += width;
+      }
+
+      return columns;
+    };
+
+    const lineWidth = (row: number): number =>
+      visibleWidth(stripTerminalSequences(sourceLine(row)));
+
+    const clampRow = (row: number): number => {
+      const scrollView = activeScrollView();
+      const contentHeight = scrollView?.contentHeight;
+      if (contentHeight !== undefined && contentHeight > 0) {
+        return Math.max(0, Math.min(contentHeight - 1, row));
+      }
+      return Math.max(0, row);
+    };
+
+    const firstNonWhitespaceColumn = (row: number): number => {
+      for (const grapheme of graphemeColumns(sourceLine(row))) {
+        if (!/\s/u.test(grapheme.text)) return grapheme.start;
+      }
+      return 0;
+    };
+
+    const lastGraphemeColumn = (row: number): number => {
+      const columns = graphemeColumns(sourceLine(row));
+      return columns[columns.length - 1]?.start ?? 0;
+    };
+
+    const graphemeEndPoint = (point: VisualPoint): NativeSelectionPoint => {
+      const columns = graphemeColumns(sourceLine(point.row));
+      const grapheme =
+        columns.find(
+          (candidate) =>
+            point.col >= candidate.start && point.col < candidate.end,
+        ) ??
+        columns.find((candidate) => candidate.start >= point.col) ??
+        columns[columns.length - 1];
+      return {
+        row: point.row,
+        col: grapheme?.end ?? point.col,
+        scrollView: activeScrollView(),
+        boundary: true,
+      };
+    };
+
+    const compareVisualPoints = (
+      left: VisualPoint,
+      right: VisualPoint,
+    ): number =>
+      left.row === right.row ? left.col - right.col : left.row - right.row;
 
     const installTranscriptLayout = (): boolean => {
       if (!tui || tui.mode !== "fullscreen") return false;
@@ -410,7 +609,7 @@ export default function transcriptFocus(
             maxSize: TRANSCRIPT_GUTTER_WIDTH,
           },
           {
-            component: new ScrollLayoutProxy(scrollView),
+            component: new ScrollLayoutProxy(scrollView, () => visualHead),
             basis: 0,
             grow: 1,
             shrink: 1,
@@ -420,7 +619,9 @@ export default function transcriptFocus(
         { align: "stretch" },
       );
       const rootEntries = rootNode.entries.map((entry, index) =>
-        index === transcriptIndex ? { ...entry, component: transcriptPane } : { ...entry },
+        index === transcriptIndex
+          ? { ...entry, component: transcriptPane }
+          : { ...entry },
       );
       const installedRoot = new VStack(rootEntries, {
         gap: rootNode.gap,
@@ -438,17 +639,22 @@ export default function transcriptFocus(
       transcriptLayout = undefined;
 
       if (tui?.setLayoutRoot) {
-        const currentRoot = tui.currentLayout?.root?.component ?? tui.layoutRoot;
+        const currentRoot =
+          tui.currentLayout?.root?.component ?? tui.layoutRoot;
         if (!currentRoot || currentRoot === installation.installedRoot) {
           tui.setLayoutRoot(installation.originalRoot);
         }
       }
     };
 
-    const componentKey = (component: Component, kind: TranscriptItemKind): string => {
+    const componentKey = (
+      component: Component,
+      kind: TranscriptItemKind,
+    ): string => {
       if (kind === "tool") {
         const toolCallId = (component as { toolCallId?: unknown }).toolCallId;
-        if (typeof toolCallId === "string" && toolCallId.length > 0) return `tool:${toolCallId}`;
+        if (typeof toolCallId === "string" && toolCallId.length > 0)
+          return `tool:${toolCallId}`;
       }
 
       const object = component as object;
@@ -496,11 +702,19 @@ export default function transcriptFocus(
         localRow += lines.length;
       }
 
+      const scrollView = activeScrollView();
+      if (scrollView) scrollView.contentHeight = localRow + transcript.startRow;
+
       const transcriptLines = renderedChildren.flatMap(({ lines }) => lines);
       const isBlankLine = (line: string | undefined): boolean =>
         line !== undefined && stripTerminalSequences(line).trim().length === 0;
 
-      for (const { child, kind, lines, startRow: childStartRow } of renderedChildren) {
+      for (const {
+        child,
+        kind,
+        lines,
+        startRow: childStartRow,
+      } of renderedChildren) {
         const bounds = kind ? visibleLineBounds(lines) : undefined;
         if (!kind || !bounds) continue;
 
@@ -512,11 +726,13 @@ export default function transcriptFocus(
         const visibleStartRow = childStartRow + bounds.first;
         const visibleEndRow = childStartRow + bounds.last + 1;
         const gutterStartRow =
-          visibleStartRow > 0 && isBlankLine(transcriptLines[visibleStartRow - 1])
+          visibleStartRow > 0 &&
+          isBlankLine(transcriptLines[visibleStartRow - 1])
             ? visibleStartRow - 1
             : visibleStartRow;
         const gutterEndRow =
-          visibleEndRow < transcriptLines.length && isBlankLine(transcriptLines[visibleEndRow])
+          visibleEndRow < transcriptLines.length &&
+          isBlankLine(transcriptLines[visibleEndRow])
             ? visibleEndRow + 1
             : visibleEndRow;
 
@@ -558,11 +774,15 @@ export default function transcriptFocus(
       hideSelectionDecoration();
     };
 
-    const selectedItemFrom = (items: TranscriptItem[]): TranscriptItem | undefined => {
+    const selectedItemFrom = (
+      items: TranscriptItem[],
+    ): TranscriptItem | undefined => {
       if (!selectedKey && !selectedSemanticKey) return undefined;
       const item =
         items.find((candidate) => candidate.key === selectedKey) ??
-        items.find((candidate) => candidate.semanticKey === selectedSemanticKey);
+        items.find(
+          (candidate) => candidate.semanticKey === selectedSemanticKey,
+        );
       if (!item) {
         selectedKey = undefined;
         selectedSemanticKey = undefined;
@@ -572,8 +792,103 @@ export default function transcriptFocus(
 
       selectedKey = item.key;
       selectedSemanticKey = item.semanticKey;
-      if (focused || exDetour) showSelection(item);
+      if ((focused || exDetour) && !inVisualMode()) showSelection(item);
       return item;
+    };
+
+    const clearNativeTextSelection = (): void => {
+      tui?.clearTextSelection?.();
+      if (tui) {
+        tui.selectionAnchor = undefined;
+        tui.selectionFocus = undefined;
+      }
+    };
+
+    const applyVisualSelection = (): void => {
+      if (!tui || !visualHead) return;
+      if (!visualAnchor) {
+        clearNativeTextSelection();
+        transcriptLayout?.gutter.setSelection(undefined);
+        tui.requestRender();
+        return;
+      }
+
+      const anchorBeforeHead =
+        compareVisualPoints(visualAnchor, visualHead) <= 0;
+      const start = anchorBeforeHead
+        ? nativeSelectionPoint(visualAnchor)
+        : nativeSelectionPoint(visualHead);
+      const end = anchorBeforeHead
+        ? graphemeEndPoint(visualHead)
+        : graphemeEndPoint(visualAnchor);
+
+      tui.selectionGranularity = "character";
+      tui.selectionInitialRange = undefined;
+      tui.selectionAnchor = start;
+      tui.selectionFocus = end;
+      transcriptLayout?.gutter.setSelection(undefined);
+      tui.requestRender();
+    };
+
+    const syncSelectionToVisualHead = (direction: -1 | 1): void => {
+      if (!visualHead) return;
+      const items = transcriptItems();
+      const row = visualHead.row;
+      const direct = items.find(
+        (item) => row >= item.startRow && row < item.endRow,
+      );
+      const adjacent =
+        direction >= 0
+          ? (items.find((item) => item.startRow >= row) ??
+            items[items.length - 1])
+          : (items.toReversed().find((item) => item.endRow <= row) ?? items[0]);
+      const next = direct ?? adjacent;
+      if (!next) return;
+      selectedKey = next.key;
+      selectedSemanticKey = next.semanticKey;
+    };
+
+    const revealVisualHead = (): void => {
+      if (!tui || !visualHead) return;
+      const scrollView = activeScrollView();
+      if (scrollView?.scrollTo && scrollView.viewportHeight > 0) {
+        const top = scrollView.scrollTop;
+        const bottom = top + scrollView.viewportHeight;
+        let target: number | undefined;
+        if (visualHead.row < top) target = visualHead.row;
+        else if (visualHead.row >= bottom)
+          target = visualHead.row - scrollView.viewportHeight + 1;
+        if (target !== undefined)
+          scrollView.scrollTo(Math.max(0, target), { disableFollow: true });
+      } else {
+        const top = tui.viewportTop ?? 0;
+        if (
+          visualHead.row < top ||
+          visualHead.row >= top + effectiveViewportHeight()
+        ) {
+          tui.scrollBy?.(visualHead.row - top);
+        }
+      }
+    };
+
+    const finishVisualMode = (
+      options: { restoreGutter: boolean } = { restoreGutter: true },
+    ): void => {
+      const head = visualHead;
+      visualAnchor = undefined;
+      visualHead = undefined;
+      visualPreferredCol = undefined;
+      visualWidth = undefined;
+      clearNativeTextSelection();
+      if (options.restoreGutter) {
+        if (head) syncSelectionToVisualHead(1);
+        const selected = selectedItemFrom(transcriptItems());
+        if (selected && focused) showSelection(selected);
+      } else {
+        transcriptLayout?.gutter.setSelection(undefined);
+      }
+      updateStatus();
+      tui?.requestRender();
     };
 
     const refreshSelectionGeometry = (): void => {
@@ -582,7 +897,12 @@ export default function transcriptFocus(
 
       const items = refreshTranscriptItems();
       const selected = selectedItemFrom(items);
-      if (selected) showSelection(selected);
+      if (visualHead)
+        visualHead = { ...visualHead, row: clampRow(visualHead.row) };
+      if (visualAnchor)
+        visualAnchor = { ...visualAnchor, row: clampRow(visualAnchor.row) };
+      if (inVisualMode()) applyVisualSelection();
+      else if (selected) showSelection(selected);
       tui?.requestRender();
     };
 
@@ -604,7 +924,11 @@ export default function transcriptFocus(
 
       ctx.ui.setStatus(
         "pi-tab-focus",
-        `TRANSCRIPT ↑↓/jk scroll • u/d half-page • shift+↑↓/JK item • b/pgup up • f/pgdn down • c/y copy${selection} • : command • tab/esc exit`,
+        inVisualMode()
+          ? isVisualSelecting()
+            ? `VISUAL SELECT h/j/k/l/arrows move • 0/^/$ line • y/c copy • enter link • esc/v cancel${selection}`
+            : `VISUAL NAV h/j/k/l/arrows move • 0/^/$ line • V start selection • enter link • esc/v cancel${selection}`
+          : `TRANSCRIPT ↑↓/jk scroll • u/d half-page • shift+↑↓/JK item • b/pgup up • f/pgdn down • c/y copy${selection} • v visual • V select • enter link • : command • tab/esc exit`,
       );
     };
 
@@ -666,7 +990,7 @@ export default function transcriptFocus(
         // EX commands may open a Pi overlay (for example a picker). Keep the
         // editor focused while that UI is active. Once the command/cancel path
         // has returned to the editor, restore transcript focus automatically.
-        if (!tui.hasOverlay() && tui.getFocusedComponent() === editor) {
+        if (!tui.hasOverlay() && tui.getFocusedComponent?.() === editor) {
           finishExDetour();
         }
       }, 0);
@@ -685,7 +1009,9 @@ export default function transcriptFocus(
     };
 
     const halfPage = (direction: -1 | 1): void => {
-      tui?.scrollBy?.(direction * Math.max(1, Math.floor(effectiveViewportHeight() / 2)));
+      tui?.scrollBy?.(
+        direction * Math.max(1, Math.floor(effectiveViewportHeight() / 2)),
+      );
     };
 
     const revealItem = (item: TranscriptItem): void => {
@@ -776,8 +1102,11 @@ export default function transcriptFocus(
       if (!next) {
         next =
           direction < 0
-            ? [...items].reverse().find((item) => item.startRow < bounds.bottom) ?? items[0]
-            : items.find((item) => item.endRow > bounds.top) ?? items[items.length - 1];
+            ? (items
+                .toReversed()
+                .find((item) => item.startRow < bounds.bottom) ?? items[0])
+            : (items.find((item) => item.endRow > bounds.top) ??
+              items[items.length - 1]);
       }
       if (!next) return;
 
@@ -813,7 +1142,7 @@ export default function transcriptFocus(
       const visibleItems = items.filter((item) => itemIsVisible(item, bounds));
       const next =
         visibleItems[visibleItems.length - 1] ??
-        [...items].reverse().find((item) => item.startRow < bounds.bottom) ??
+        items.toReversed().find((item) => item.startRow < bounds.bottom) ??
         items[items.length - 1];
       if (!next) return;
 
@@ -883,6 +1212,175 @@ export default function transcriptFocus(
       );
     };
 
+    const ensureVisualWidth = (): boolean => {
+      if (!inVisualMode()) return true;
+      if (visualWidth === transcriptWidth()) return true;
+      finishVisualMode();
+      return false;
+    };
+
+    const selectedVisualStartPoint = (): VisualPoint | undefined => {
+      const items = refreshTranscriptItems();
+      const selected = selectedItemFrom(items) ?? items[items.length - 1];
+      if (!selected) {
+        ctx.ui.notify("No selectable transcript item.", "warning");
+        return undefined;
+      }
+      selectedKey = selected.key;
+      selectedSemanticKey = selected.semanticKey;
+      const row = clampRow(selected.startRow);
+      return { row, col: firstNonWhitespaceColumn(row) };
+    };
+
+    const enterVisualMode = (): void => {
+      const point = selectedVisualStartPoint();
+      if (!point) return;
+      visualAnchor = undefined;
+      visualHead = point;
+      visualPreferredCol = point.col;
+      visualWidth = transcriptWidth();
+      hideSelectionDecoration();
+      revealVisualHead();
+      applyVisualSelection();
+      updateStatus();
+    };
+
+    const startVisualSelection = (): void => {
+      if (!visualHead) {
+        enterVisualMode();
+        if (!visualHead) return;
+      }
+      visualAnchor = { ...visualHead };
+      applyVisualSelection();
+      updateStatus();
+    };
+
+    const setVisualHead = (next: VisualPoint, direction: -1 | 1): void => {
+      if (!visualHead) return;
+      visualHead = { row: clampRow(next.row), col: Math.max(0, next.col) };
+      syncSelectionToVisualHead(direction);
+      revealVisualHead();
+      applyVisualSelection();
+      updateStatus();
+    };
+
+    const moveVisualHorizontal = (direction: -1 | 1): void => {
+      if (!visualHead || !ensureVisualWidth()) return;
+      const columns = graphemeColumns(sourceLine(visualHead.row));
+      if (columns.length === 0) {
+        visualPreferredCol = 0;
+        setVisualHead({ ...visualHead, col: 0 }, direction);
+        return;
+      }
+      const exactIndex = columns.findIndex(
+        (column) => visualHead && column.start === visualHead.col,
+      );
+      const fallbackIndex = columns.findLastIndex(
+        (column) => visualHead && column.start < visualHead.col,
+      );
+      const index = exactIndex >= 0 ? exactIndex : Math.max(0, fallbackIndex);
+      const next =
+        columns[Math.max(0, Math.min(columns.length - 1, index + direction))];
+      visualPreferredCol = next?.start ?? 0;
+      setVisualHead({ ...visualHead, col: next?.start ?? 0 }, direction);
+    };
+
+    const nearestGraphemeColumn = (row: number, preferred: number): number => {
+      const columns = graphemeColumns(sourceLine(row));
+      if (columns.length === 0) return 0;
+      const containing = columns.find(
+        (column) => preferred >= column.start && preferred < column.end,
+      );
+      if (containing) return containing.start;
+      if (preferred >= lineWidth(row))
+        return columns[columns.length - 1]?.start ?? 0;
+      return columns.find((column) => column.start >= preferred)?.start ?? 0;
+    };
+
+    const moveVisualVertical = (direction: -1 | 1): void => {
+      if (!visualHead || !ensureVisualWidth()) return;
+      const preferred = visualPreferredCol ?? visualHead.col;
+      const row = clampRow(visualHead.row + direction);
+      visualPreferredCol = preferred;
+      setVisualHead(
+        { row, col: nearestGraphemeColumn(row, preferred) },
+        direction,
+      );
+    };
+
+    const moveVisualLine = (
+      motion: "0" | "^" | "$",
+      direction: -1 | 1,
+    ): void => {
+      if (!visualHead || !ensureVisualWidth()) return;
+      let col = 0;
+      if (motion === "^") col = firstNonWhitespaceColumn(visualHead.row);
+      else if (motion === "$") col = lastGraphemeColumn(visualHead.row);
+      visualPreferredCol = col;
+      setVisualHead({ ...visualHead, col }, direction);
+    };
+
+    const copyVisualSelection = (): void => {
+      if (!isVisualSelecting()) {
+        ctx.ui.notify("Press V to start a text selection.", "info");
+        return;
+      }
+      void tui?.copyActiveSelectionToClipboard?.().then(
+        (ok) =>
+          ctx.ui.notify(
+            ok ? "Copied selected text." : "No text selection to copy.",
+            ok ? "info" : "warning",
+          ),
+        (error: unknown) =>
+          ctx.ui.notify(
+            `Failed to copy selection: ${error instanceof Error ? error.message : String(error)}`,
+            "error",
+          ),
+      );
+      finishVisualMode();
+    };
+
+    const literalUrlAtColumn = (
+      line: string,
+      col: number,
+    ): string | undefined => {
+      const stripped = stripTerminalSequences(line);
+      const urlPattern = /(?:https?:\/\/|file:\/\/|mailto:)[^\s<>()]+/gu;
+      for (const match of stripped.matchAll(urlPattern)) {
+        const text = match[0];
+        const start = visibleWidth(stripped.slice(0, match.index));
+        const end = start + visibleWidth(text);
+        if (col >= start && col < end) return text;
+      }
+      return undefined;
+    };
+
+    const firstLiteralUrl = (text: string): string | undefined =>
+      text.match(/(?:https?:\/\/|file:\/\/|mailto:)[^\s<>()]+/u)?.[0];
+
+    const openSelectedLink = (): void => {
+      let url: string | undefined;
+      if (inVisualMode() && visualHead) {
+        const line = sourceLine(visualHead.row);
+        url =
+          getOsc8LinkAtColumn(line, visualHead.col) ??
+          literalUrlAtColumn(line, visualHead.col);
+      }
+      if (!url) {
+        const selected = selectedItemFrom(transcriptItems());
+        if (selected) url = firstLiteralUrl(selected.text);
+      }
+      if (!url) {
+        ctx.ui.notify("No link found in selected transcript item.", "info");
+        return;
+      }
+      try {
+        tui?.openUrl?.(url);
+      } catch {
+        ctx.ui.notify(`Failed to open link: ${url}`, "error");
+      }
+    };
+
     // Preserve pi-vim's real ModalEditor/CustomEditor instance. Pi can therefore
     // see and wire its actionHandlers, onEscape, onCtrlD, image-paste handler,
     // extension shortcuts and any future CustomEditor surface directly.
@@ -942,6 +1440,7 @@ export default function transcriptFocus(
       if (matchesKey(data, Key.tab)) {
         // Holding Tab must not repeatedly flip focus on Kitty key-repeat events.
         if (!isKeyRepeat(data)) {
+          if (inVisualMode()) finishVisualMode({ restoreGutter: false });
           if (focused) leaveTranscriptMode();
           else enterTranscriptMode();
         }
@@ -951,7 +1450,53 @@ export default function transcriptFocus(
       if (!focused) return undefined;
 
       if (matchesKey(data, Key.escape)) {
-        leaveTranscriptMode();
+        if (inVisualMode()) finishVisualMode();
+        else leaveTranscriptMode();
+        return { consume: true };
+      }
+
+      if (data === "v") {
+        if (inVisualMode()) finishVisualMode();
+        else enterVisualMode();
+        return { consume: true };
+      }
+
+      if (data === "V") {
+        if (inVisualMode()) startVisualSelection();
+        else {
+          enterVisualMode();
+          startVisualSelection();
+        }
+        return { consume: true };
+      }
+
+      if (data === "h" || matchesKey(data, Key.left)) {
+        if (inVisualMode()) moveVisualHorizontal(-1);
+        return { consume: true };
+      }
+
+      if (data === "l" || matchesKey(data, Key.right)) {
+        if (inVisualMode()) moveVisualHorizontal(1);
+        return { consume: true };
+      }
+
+      if (data === "0" && inVisualMode()) {
+        moveVisualLine("0", -1);
+        return { consume: true };
+      }
+
+      if (data === "^" && inVisualMode()) {
+        moveVisualLine("^", -1);
+        return { consume: true };
+      }
+
+      if (data === "$" && inVisualMode()) {
+        moveVisualLine("$", 1);
+        return { consume: true };
+      }
+
+      if (matchesKey(data, Key.enter)) {
+        openSelectedLink();
         return { consume: true };
       }
 
@@ -961,6 +1506,7 @@ export default function transcriptFocus(
           return { consume: true };
         }
 
+        if (inVisualMode()) finishVisualMode();
         exDetour = true;
         exReturnArmed = false;
         setFocused(false);
@@ -971,14 +1517,20 @@ export default function transcriptFocus(
       }
 
       if (data === "j" || matchesKey(data, Key.down)) {
-        tui?.scrollBy?.(1);
-        syncSelectionToViewport(1);
+        if (inVisualMode()) moveVisualVertical(1);
+        else {
+          tui?.scrollBy?.(1);
+          syncSelectionToViewport(1);
+        }
         return { consume: true };
       }
 
       if (data === "k" || matchesKey(data, Key.up)) {
-        tui?.scrollBy?.(-1);
-        syncSelectionToViewport(-1);
+        if (inVisualMode()) moveVisualVertical(-1);
+        else {
+          tui?.scrollBy?.(-1);
+          syncSelectionToViewport(-1);
+        }
         return { consume: true };
       }
 
@@ -999,6 +1551,7 @@ export default function transcriptFocus(
       );
       if (transcriptLayoutAction) {
         if (!isKeyRepeat(data)) {
+          if (inVisualMode()) finishVisualMode();
           const handler = editor?.actionHandlers?.get(transcriptLayoutAction);
           if (handler) handler();
           else editor?.handleInput(data);
@@ -1050,7 +1603,8 @@ export default function transcriptFocus(
       }
 
       if (data === "y" || data === "c") {
-        copySelectedItem();
+        if (inVisualMode()) copyVisualSelection();
+        else copySelectedItem();
         return { consume: true };
       }
 
@@ -1069,10 +1623,12 @@ export default function transcriptFocus(
 
       exDetour = false;
       exReturnArmed = false;
+      if (inVisualMode()) finishVisualMode({ restoreGutter: false });
       clearSelection();
       transcriptItemsCache = undefined;
       restoreTranscriptLayout();
-      if (refreshActiveTranscript === refreshSelectionGeometry) refreshActiveTranscript = undefined;
+      if (refreshActiveTranscript === refreshSelectionGeometry)
+        refreshActiveTranscript = undefined;
 
       ctx.ui.setStatus("pi-tab-focus", undefined);
 
