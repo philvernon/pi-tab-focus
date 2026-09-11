@@ -572,7 +572,7 @@ export default function transcriptFocus(pi: ExtensionAPI): void {
 
       ctx.ui.setStatus(
         "pi-tab-focus",
-        `TRANSCRIPT ↑↓/jk scroll • shift+↑↓/JK item • b/pgup up • f/pgdn down • c/y copy${selection} • : command • tab/esc exit`,
+        `TRANSCRIPT ↑↓/jk scroll • u/d half-page • shift+↑↓/JK item • b/pgup up • f/pgdn down • c/y copy${selection} • : command • tab/esc exit`,
       );
     };
 
@@ -644,6 +644,16 @@ export default function transcriptFocus(pi: ExtensionAPI): void {
       if (!tui) return;
       const lines = Math.max(1, tui.terminal.rows - 5);
       tui.scrollBy?.(direction * lines);
+    };
+
+    const halfPage = (direction: -1 | 1): void => {
+      if (!tui) return;
+      const viewportHeight = activeScrollView()?.viewportHeight;
+      const pageHeight =
+        viewportHeight && viewportHeight > 0
+          ? viewportHeight
+          : Math.max(1, tui.terminal.rows - 5);
+      tui.scrollBy?.(direction * Math.max(1, Math.floor(pageHeight / 2)));
     };
 
     const revealItem = (item: TranscriptItem): void => {
@@ -938,6 +948,18 @@ export default function transcriptFocus(pi: ExtensionAPI): void {
       if (data === "k" || matchesKey(data, Key.up)) {
         tui?.scrollBy?.(-1);
         syncSelectionToViewport(-1);
+        return { consume: true };
+      }
+
+      if (data === "u") {
+        halfPage(-1);
+        syncSelectionToViewport(-1);
+        return { consume: true };
+      }
+
+      if (data === "d") {
+        halfPage(1);
+        syncSelectionToViewport(1);
         return { consume: true };
       }
 

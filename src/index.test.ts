@@ -438,12 +438,14 @@ test("transcript navigation consumes keys and drives fullscreen scrolling", () =
 
   h.input("j");
   h.input("k");
+  h.input("u");
+  h.input("d");
   h.input("b");
   h.input("f");
   h.input("g");
   h.input("G");
 
-  assert.deepEqual(h.scrollBy, [1, -1, -25, 25]);
+  assert.deepEqual(h.scrollBy, [1, -1, -2, 2, -25, 25]);
   assert.equal(h.scrollTopCalls, 1);
   assert.equal(h.scrollBottomCalls, 1);
   assert.deepEqual(h.editorInputs, []);

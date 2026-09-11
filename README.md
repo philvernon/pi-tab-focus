@@ -39,6 +39,8 @@ Use `/reload` after changing the package. The current development baseline is Pi
 | `Tab` | enter/leave transcript focus |
 | `j`, `↓` | scroll down one line |
 | `k`, `↑` | scroll up one line |
+| `u` | scroll up half a page |
+| `d` | scroll down half a page |
 | `Shift+J`, `Shift+↓` | select next transcript item |
 | `Shift+K`, `Shift+↑` | select previous transcript item |
 | `b`, `PgUp` | page up |
