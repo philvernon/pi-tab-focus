@@ -39,13 +39,13 @@ Use `/reload` after changing the package. The current development baseline is Pi
 | `Tab` | enter/leave transcript focus |
 | `j`, `↓` | scroll down one line |
 | `k`, `↑` | scroll up one line |
-| `Shift+J`, `Shift+↓` | next semantic user prompt |
-| `Shift+K`, `Shift+↑` | previous semantic user prompt |
+| `Shift+J`, `Shift+↓` | select next transcript item |
+| `Shift+K`, `Shift+↑` | select previous transcript item |
 | `b`, `PgUp` | page up |
 | `f`, `PgDn` | page down |
 | `g`, `Home` | top |
 | `G`, `End` | bottom |
-| `y`, `c` | copy selected prompt using Pi's clipboard helper |
+| `y`, `c` | copy selected transcript item using Pi's clipboard helper |
 | `:` | temporarily enter pi-vim EX mode, then return to transcript focus when the command/cancel path finishes; `Tab` cancels EX and returns immediately |
 | `Esc` | leave transcript mode |
 
@@ -53,13 +53,13 @@ Transcript mode is implemented through Pi's `ctx.ui.onTerminalInput()` hook. The
 
 The active transcript-mode hint is shown with `ctx.ui.setStatus()` in Pi's footer rather than by modifying pi-vim's rendered editor.
 
-## Current Pi API limitation
+`Shift+J/K` walks the rendered transcript item-by-item: user prompts, assistant messages, tool executions, bash entries, skill invocations, summaries and custom transcript entries. The transcript reserves a two-column Crush-style gutter from startup, before transcript focus is entered, so pressing `Tab` never moves its text: column 0 holds the heavy `┃` marker and column 1 is the gap. Prompt markers are pink, response/tool markers are green, and prompt gutters inherit the prompt line's existing background styling. `y/c` copies the unhighlighted rendered item.
 
-Pi 0.85.1 exposes fullscreen line/page scrolling and semantic prompt jumps but does not expose a public transcript-item model that maps every rendered assistant block, tool call and tool result to viewport rows.
+Entering transcript mode automatically selects the bottom-most visible item unless the previous selection is still visible. Line/page/top/bottom scrolling preserves the current selection while it remains on-screen; once it scrolls out of view, selection stays attached to the edge it exited through: the bottom-most visible item when scrolling up, or the top-most visible item when scrolling down.
 
-For that reason `Shift+J/K` currently selects **user prompts**, not every rendered transcript block, and logical prompt selection is only best-effort aligned with Pi's viewport prompt jump. `y/c` copies the logically selected prompt.
+## Pi API compatibility note
 
-Implementing exact Crush-style selection of assistant messages and individual tool calls requires a Pi API that exposes rendered transcript items and their viewport row bounds.
+Pi 0.85.1 does not expose a public transcript-item/viewport API. Item discovery therefore uses Pi's mounted component tree, while smooth "reveal selected item" scrolling uses the fullscreen TUI's private `currentLayout.primaryScrollView` when available. That access is guarded; if the private layout shape changes, selection still works and falls back to positioning the selected item from the public viewport position.
 
 ## Development
 
@@ -68,4 +68,4 @@ npm ci
 npm test
 ```
 
-The test suite covers transcript focus entry/exit, fullscreen scrolling, semantic prompt navigation, EX-mode detours and session cleanup.
+The test suite covers transcript focus entry/exit, viewport-following selection, item ordering/highlighting across prompts/messages/tools, EX-mode detours and session cleanup.
