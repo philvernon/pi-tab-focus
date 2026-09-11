@@ -53,13 +53,13 @@ Transcript mode is implemented through Pi's `ctx.ui.onTerminalInput()` hook. The
 
 The active transcript-mode hint is shown with `ctx.ui.setStatus()` in Pi's footer rather than by modifying pi-vim's rendered editor.
 
-`Shift+J/K` walks the rendered transcript item-by-item: user prompts, assistant messages, tool executions, bash entries, skill invocations, summaries and custom transcript entries. The transcript reserves a two-column Crush-style gutter from startup, before transcript focus is entered, so pressing `Tab` never moves its text: column 0 holds the heavy `┃` marker and column 1 is the gap. Prompt markers are pink, response/tool markers are green, and prompt gutters inherit the prompt line's existing background styling. `y/c` copies the unhighlighted rendered item.
+`Shift+J/K` walks the rendered transcript item-by-item: user prompts, assistant messages, tool executions, bash entries, skill invocations, summaries and custom transcript entries. The transcript reserves a one-column Crush-style gutter from startup, before transcript focus is entered, so pressing `Tab` never moves its text. The gutter holds the heavy `┃` marker directly beside the transcript and spans visible item content plus at most one adjacent blank transcript row above and below, giving each selection the same padded Crush-style treatment without swallowing unrelated layout space. Prompt markers are pink and response/tool markers are green. `y/c` copies the unhighlighted rendered item.
 
 Entering transcript mode automatically selects the bottom-most visible item unless the previous selection is still visible. Line/page/top/bottom scrolling preserves the current selection while it remains on-screen; once it scrolls out of view, selection stays attached to the edge it exited through: the bottom-most visible item when scrolling up, or the top-most visible item when scrolling down.
 
 ## Pi API compatibility note
 
-Pi 0.85.1 does not expose a public transcript-item/viewport API. Item discovery therefore uses Pi's mounted component tree, while smooth "reveal selected item" scrolling uses the fullscreen TUI's private `currentLayout.primaryScrollView` when available. That access is guarded; if the private layout shape changes, selection still works and falls back to positioning the selected item from the public viewport position.
+Pi 0.85.1 does not expose a public transcript-item/viewport API. Item discovery therefore uses Pi's mounted component tree. The permanent gutter is composed beside Pi's existing fullscreen transcript `ScrollView`, while smooth "reveal selected item" scrolling uses its private viewport state when available. Those private layout reads are guarded; if the layout shape changes, the extension degrades without rewriting transcript content.
 
 ## Development
 

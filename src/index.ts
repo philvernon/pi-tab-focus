@@ -3,7 +3,9 @@ import {
   type ExtensionAPI,
 } from "@earendil-works/pi-coding-agent";
 import {
+  HStack,
   Key,
+  VStack,
   isKeyRelease,
   isKeyRepeat,
   matchesKey,
@@ -17,9 +19,10 @@ type PiVimEditor = EditorComponent & {
   getMode?: () => string;
 };
 
-type PrivateScrollView = {
+type PrivateScrollView = Component & {
   scrollTop: number;
   viewportHeight: number;
+  primary?: boolean;
   getContentWidth?: (width: number) => number;
   scrollTo?: (scrollTop: number, options?: { disableFollow?: boolean }) => void;
 };
@@ -29,9 +32,12 @@ type FullscreenTui = TUI & {
   scrollBy?: (lines: number) => void;
   scrollToTop?: () => void;
   scrollToBottom?: () => void;
-  // Private in Pi's public TUI type. Guarded everywhere and used only to reveal
-  // a selected transcript item without unnecessarily pinning it to the top row.
+  setLayoutRoot?: (component: Component | undefined) => void;
+  // Both fields are private in TuiAltScreen's public type. Access is guarded and
+  // limited to fullscreen transcript layout/viewport integration.
+  layoutRoot?: Component;
   currentLayout?: {
+    root?: { component: Component };
     primaryScrollView?: PrivateScrollView;
   };
 };
@@ -40,9 +46,30 @@ type ComponentWithChildren = Component & {
   children?: Component[];
 };
 
-type MutableComponent = Component & {
-  render: (width: number) => string[];
+type PrivateStackEntry = {
+  component: Component;
+  basis?: number | "auto";
+  grow?: number;
+  shrink?: number;
+  minSize?: number;
+  maxSize?: number;
+  visible?: (viewport: { width: number; height: number }) => boolean;
 };
+
+type PrivateStackLayoutNode = {
+  type: "vstack" | "hstack";
+  entries: PrivateStackEntry[];
+  gap: number;
+  align: "stretch" | "start" | "center" | "end";
+};
+
+type PrivateScrollLayoutNode = {
+  type: "scroll";
+  component: Component;
+  state: PrivateScrollView;
+};
+
+type PrivateLayoutNode = PrivateStackLayoutNode | PrivateScrollLayoutNode;
 
 type TranscriptItemKind =
   | "prompt"
@@ -60,18 +87,20 @@ type TranscriptItem = {
   component: Component;
   startRow: number;
   endRow: number;
+  gutterStartRow: number;
+  gutterEndRow: number;
   text: string;
 };
 
-type RenderDecoration = {
-  component: MutableComponent;
-  originalRender: (width: number) => string[];
-  restore: () => void;
+type TranscriptLayoutInstallation = {
+  originalRoot: Component;
+  installedRoot: Component;
+  scrollView: PrivateScrollView;
+  gutter: TranscriptGutterComponent;
 };
 
-const OSC133_ZONE_PREFIX = /^(?:\x1b\]133;[ABC](?:\x07|\x1b\\))+/;
-const LEADING_SGR_PREFIX = /^(?:\x1b\[[0-?]*[ -/]*[@-~])+/;
-const SELECTED_LINE_SENTINEL = "\x1b]9999;pi-tab-focus-selected\x07";
+const LAYOUT_NODE = Symbol.for("@earendil-works/pi-tui/layout-node");
+const TRANSCRIPT_GUTTER_WIDTH = 1;
 const PROMPT_SELECTION_MARKER = "\x1b[38;2;255;121;198m┃\x1b[39m";
 const RESPONSE_SELECTION_MARKER = "\x1b[38;2;92;196;147m┃\x1b[39m";
 
@@ -151,32 +180,76 @@ function semanticItemBaseKey(
   return `${kind}:${hashText(text)}`;
 }
 
-function renderWithTranscriptGutter(
-  line: string,
-  width: number,
-  selectedKind?: TranscriptItemKind,
-): string {
-  const selected = line.startsWith(SELECTED_LINE_SENTINEL);
-  const rawLine = selected ? line.slice(SELECTED_LINE_SENTINEL.length) : line;
-  const match = rawLine.match(OSC133_ZONE_PREFIX);
-  const prefix = match?.[0] ?? "";
-  const body = prefix.length > 0 ? rawLine.slice(prefix.length) : rawLine;
-  const totalWidth = Math.max(1, width);
+function privateLayoutNode(component: Component): PrivateLayoutNode | undefined {
+  const getter = (component as unknown as Record<symbol, unknown>)[LAYOUT_NODE];
+  return typeof getter === "function"
+    ? (getter.call(component) as PrivateLayoutNode | undefined)
+    : undefined;
+}
 
-  if (totalWidth < 3) return `${prefix}${body}`;
+class ScrollLayoutProxy implements Component {
+  private readonly scrollView: PrivateScrollView;
 
-  const leadingStyle = body.match(LEADING_SGR_PREFIX)?.[0] ?? "";
-  if (!selected || !selectedKind) {
-    const gutter = leadingStyle ? `${leadingStyle}  \x1b[0m` : "  ";
-    return `${prefix}${gutter}${body}`;
+  constructor(scrollView: PrivateScrollView) {
+    this.scrollView = scrollView;
   }
 
-  const rawMarker =
-    selectedKind === "prompt" ? PROMPT_SELECTION_MARKER : RESPONSE_SELECTION_MARKER;
-  const gutter = leadingStyle
-    ? `${leadingStyle}${rawMarker} \x1b[0m`
-    : `${rawMarker} `;
-  return `${prefix}${gutter}${body}`;
+  render(_width: number): string[] {
+    // HStack measures child height before laying it out. Returning no legacy
+    // lines avoids a second full transcript render; the delegated scroll layout
+    // below still renders the real document exactly once through Pi's layout engine.
+    return [];
+  }
+
+  invalidate(): void {
+    this.scrollView.invalidate?.();
+  }
+
+  [LAYOUT_NODE](): PrivateLayoutNode | undefined {
+    return privateLayoutNode(this.scrollView);
+  }
+}
+
+class TranscriptGutterComponent implements Component {
+  private selected:
+    | { startRow: number; endRow: number; kind: TranscriptItemKind }
+    | undefined;
+  private readonly getScrollTop: () => number;
+  private readonly getRenderRows: () => number;
+
+  constructor(getScrollTop: () => number, getRenderRows: () => number) {
+    this.getScrollTop = getScrollTop;
+    this.getRenderRows = getRenderRows;
+  }
+
+  setSelection(item: TranscriptItem | undefined): void {
+    this.selected = item
+      ? {
+          startRow: item.gutterStartRow,
+          endRow: item.gutterEndRow,
+          kind: item.kind,
+        }
+      : undefined;
+  }
+
+  render(_width: number): string[] {
+    const rows = Math.max(1, this.getRenderRows());
+    const lines = Array.from({ length: rows }, () => "");
+    if (!this.selected) return lines;
+
+    const top = this.getScrollTop();
+    const first = Math.max(0, this.selected.startRow - top);
+    const last = Math.min(rows, this.selected.endRow - top);
+    if (first >= last) return lines;
+
+    const marker =
+      this.selected.kind === "prompt" ? PROMPT_SELECTION_MARKER : RESPONSE_SELECTION_MARKER;
+
+    for (let row = first; row < last; row++) lines[row] = marker;
+    return lines;
+  }
+
+  invalidate(): void {}
 }
 
 function findTranscriptContainer(
@@ -211,8 +284,8 @@ function findMountedTranscriptContainer(
   // Pi mounts documentContainer as the first TUI child with
   // [headerContainer, loadedResourcesContainer, chatContainer]. During
   // session_start the chat container can still be empty, so semantic discovery
-  // cannot find it yet. Use that stable mounted shape as a guarded fallback so
-  // the gutter exists before the first transcript item is rendered.
+  // cannot find it yet. Use that stable mounted shape as a guarded fallback for
+  // early transcript-item discovery.
   const document = roots[0];
   if (!document) return undefined;
 
@@ -254,68 +327,102 @@ export default function transcriptFocus(pi: ExtensionAPI): void {
     let focused = false;
     let selectedKey: string | undefined;
     let selectedSemanticKey: string | undefined;
-    let selectedKind: TranscriptItemKind | undefined;
     let transcriptItemsCache: TranscriptItem[] | undefined;
-    let transcriptGutterDecoration: RenderDecoration | undefined;
-    let selectionDecoration: RenderDecoration | undefined;
+    let transcriptLayout: TranscriptLayoutInstallation | undefined;
     const componentKeys = new WeakMap<object, string>();
     let nextComponentKey = 1;
     let exDetour = false;
     let exReturnArmed = false;
     let exReturnCheck: ReturnType<typeof setTimeout> | undefined;
 
+    const activeScrollView = (): PrivateScrollView | undefined =>
+      transcriptLayout?.scrollView ?? tui?.currentLayout?.primaryScrollView;
+
     const transcriptWidth = (): number => {
       if (!tui) return 1;
-      const terminalWidth = Math.max(1, tui.terminal.columns);
-      return (
-        tui.currentLayout?.primaryScrollView?.getContentWidth?.(terminalWidth) ?? terminalWidth
+      const terminalWidth = Math.max(
+        1,
+        tui.terminal.columns - (transcriptLayout ? TRANSCRIPT_GUTTER_WIDTH : 0),
       );
+      return activeScrollView()?.getContentWidth?.(terminalWidth) ?? terminalWidth;
     };
 
-    const transcriptContentWidth = (width: number): number =>
-      width >= 3 ? width - 2 : Math.max(1, width);
+    const installTranscriptLayout = (): boolean => {
+      if (!tui || tui.mode !== "fullscreen") return false;
+      if (transcriptLayout) return true;
+      if (!tui.setLayoutRoot) return false;
 
-    const restoreTranscriptGutter = (): void => {
-      transcriptGutterDecoration?.restore();
-      transcriptGutterDecoration = undefined;
+      const originalRoot = tui.currentLayout?.root?.component ?? tui.layoutRoot;
+      if (!originalRoot) return false;
+
+      const rootNode = privateLayoutNode(originalRoot);
+      if (!rootNode || rootNode.type !== "vstack") return false;
+
+      const currentPrimary = tui.currentLayout?.primaryScrollView;
+      let transcriptIndex = -1;
+      let scrollNode: PrivateScrollLayoutNode | undefined;
+
+      for (let index = 0; index < rootNode.entries.length; index++) {
+        const node = privateLayoutNode(rootNode.entries[index].component);
+        if (!node || node.type !== "scroll") continue;
+        if (currentPrimary && node.state !== currentPrimary) continue;
+        if (!currentPrimary && !node.state.primary) continue;
+        transcriptIndex = index;
+        scrollNode = node;
+        break;
+      }
+
+      if (transcriptIndex < 0 || !scrollNode) return false;
+
+      const scrollView = scrollNode.state;
+      const gutter = new TranscriptGutterComponent(
+        () => scrollView.scrollTop,
+        () => tui?.terminal.rows ?? 1,
+      );
+      const transcriptPane = new HStack(
+        [
+          {
+            component: gutter,
+            basis: TRANSCRIPT_GUTTER_WIDTH,
+            grow: 0,
+            shrink: 0,
+            minSize: TRANSCRIPT_GUTTER_WIDTH,
+            maxSize: TRANSCRIPT_GUTTER_WIDTH,
+          },
+          {
+            component: new ScrollLayoutProxy(scrollView),
+            basis: 0,
+            grow: 1,
+            shrink: 1,
+            minSize: 1,
+          },
+        ],
+        { align: "stretch" },
+      );
+      const rootEntries = rootNode.entries.map((entry, index) =>
+        index === transcriptIndex ? { ...entry, component: transcriptPane } : { ...entry },
+      );
+      const installedRoot = new VStack(rootEntries, {
+        gap: rootNode.gap,
+        align: rootNode.align,
+      });
+
+      transcriptLayout = { originalRoot, installedRoot, scrollView, gutter };
+      tui.setLayoutRoot(installedRoot);
+      return true;
     };
 
-    const ensureTranscriptGutter = (component: Component): void => {
-      if (transcriptGutterDecoration?.component === component) return;
-      restoreTranscriptGutter();
+    const restoreTranscriptLayout = (): void => {
+      if (!transcriptLayout) return;
+      const installation = transcriptLayout;
+      transcriptLayout = undefined;
 
-      const mutable = component as MutableComponent;
-      const hadOwnRender = Object.prototype.hasOwnProperty.call(mutable, "render");
-      const ownRender = hadOwnRender ? mutable.render : undefined;
-      const originalRender = mutable.render.bind(mutable);
-
-      mutable.render = (width: number): string[] =>
-        originalRender(transcriptContentWidth(width)).map((line) =>
-          renderWithTranscriptGutter(line, width, selectedKind),
-        );
-
-      transcriptGutterDecoration = {
-        component: mutable,
-        originalRender,
-        restore: () => {
-          if (hadOwnRender && ownRender) mutable.render = ownRender;
-          else delete (mutable as Partial<MutableComponent>).render;
-        },
-      };
-    };
-
-    const renderItemOriginal = (component: Component, width: number): string[] => {
-      const render =
-        selectionDecoration?.component === component
-          ? selectionDecoration.originalRender
-          : component.render.bind(component);
-      return render(width);
-    };
-
-    const restoreSelectionDecoration = (): void => {
-      selectionDecoration?.restore();
-      selectionDecoration = undefined;
-      selectedKind = undefined;
+      if (tui?.setLayoutRoot) {
+        const currentRoot = tui.currentLayout?.root?.component ?? tui.layoutRoot;
+        if (!currentRoot || currentRoot === installation.installedRoot) {
+          tui.setLayoutRoot(installation.originalRoot);
+        }
+      }
     };
 
     const componentKey = (component: Component, kind: TranscriptItemKind): string => {
@@ -343,43 +450,70 @@ export default function transcriptFocus(pi: ExtensionAPI): void {
       const transcript = findMountedTranscriptContainer(tui.children, width);
 
       if (!transcript) {
-        restoreSelectionDecoration();
-        restoreTranscriptGutter();
+        transcriptLayout?.gutter.setSelection(undefined);
         transcriptItemsCache = [];
         return transcriptItemsCache;
       }
 
-      ensureTranscriptGutter(transcript.component);
-
       const items: TranscriptItem[] = [];
       const duplicateKeys = new Map<string, number>();
-      const contentWidth = transcriptContentWidth(width);
-      let row = transcript.startRow;
+      const renderedChildren: Array<{
+        child: Component;
+        kind: TranscriptItemKind | undefined;
+        lines: string[];
+        startRow: number;
+      }> = [];
+      let localRow = 0;
 
       for (const child of transcript.component.children ?? []) {
-        const kind = transcriptItemKind(child);
-        const lines = renderItemOriginal(child, contentWidth);
-        const height = lines.length;
+        const lines = child.render(width);
+        renderedChildren.push({
+          child,
+          kind: transcriptItemKind(child),
+          lines,
+          startRow: localRow,
+        });
+        localRow += lines.length;
+      }
+
+      const transcriptLines = renderedChildren.flatMap(({ lines }) => lines);
+      const isBlankLine = (line: string | undefined): boolean =>
+        line !== undefined && stripTerminalSequences(line).trim().length === 0;
+
+      for (const { child, kind, lines, startRow: childStartRow } of renderedChildren) {
         const bounds = kind ? visibleLineBounds(lines) : undefined;
+        if (!kind || !bounds) continue;
 
-        if (kind && bounds) {
-          const text = trimRenderedText(lines);
-          const baseKey = semanticItemBaseKey(child, kind, text);
-          const occurrence = duplicateKeys.get(baseKey) ?? 0;
-          duplicateKeys.set(baseKey, occurrence + 1);
+        const text = trimRenderedText(lines);
+        const baseKey = semanticItemBaseKey(child, kind, text);
+        const occurrence = duplicateKeys.get(baseKey) ?? 0;
+        duplicateKeys.set(baseKey, occurrence + 1);
 
-          items.push({
-            key: componentKey(child, kind),
-            semanticKey: `${baseKey}:${occurrence}`,
-            kind,
-            component: child,
-            startRow: row + bounds.first,
-            endRow: row + bounds.last + 1,
-            text,
-          });
-        }
+        const visibleStartRow = childStartRow + bounds.first;
+        const visibleEndRow = childStartRow + bounds.last + 1;
+        const gutterStartRow =
+          visibleStartRow > 0 && isBlankLine(transcriptLines[visibleStartRow - 1])
+            ? visibleStartRow - 1
+            : visibleStartRow;
+        const gutterEndRow =
+          visibleEndRow < transcriptLines.length && isBlankLine(transcriptLines[visibleEndRow])
+            ? visibleEndRow + 1
+            : visibleEndRow;
 
-        row += height;
+        items.push({
+          key: componentKey(child, kind),
+          semanticKey: `${baseKey}:${occurrence}`,
+          kind,
+          component: child,
+          startRow: transcript.startRow + visibleStartRow,
+          endRow: transcript.startRow + visibleEndRow,
+          // Navigation stays anchored to visible content. The gutter absorbs at
+          // most one adjacent blank transcript row above and below, regardless
+          // of whether Pi owns that spacing inside or outside the component.
+          gutterStartRow: transcript.startRow + gutterStartRow,
+          gutterEndRow: transcript.startRow + gutterEndRow,
+          text,
+        });
       }
 
       transcriptItemsCache = items;
@@ -390,43 +524,11 @@ export default function transcriptFocus(pi: ExtensionAPI): void {
       transcriptItemsCache ?? refreshTranscriptItems();
 
     const showSelection = (item: TranscriptItem): void => {
-      if (selectionDecoration?.component === item.component) {
-        selectedKind = item.kind;
-        return;
-      }
-
-      restoreSelectionDecoration();
-
-      const mutable = item.component as MutableComponent;
-      const hadOwnRender = Object.prototype.hasOwnProperty.call(mutable, "render");
-      const ownRender = hadOwnRender ? mutable.render : undefined;
-      const originalRender = mutable.render.bind(mutable);
-
-      mutable.render = (width: number): string[] => {
-        const lines = originalRender(width);
-        const bounds = visibleLineBounds(lines);
-        if (!bounds) return lines;
-
-        return lines.map((line, index) =>
-          index >= bounds.first && index <= bounds.last
-            ? `${SELECTED_LINE_SENTINEL}${line}`
-            : line,
-        );
-      };
-
-      selectedKind = item.kind;
-      selectionDecoration = {
-        component: mutable,
-        originalRender,
-        restore: () => {
-          if (hadOwnRender && ownRender) mutable.render = ownRender;
-          else delete (mutable as Partial<MutableComponent>).render;
-        },
-      };
+      transcriptLayout?.gutter.setSelection(item);
     };
 
     const hideSelectionDecoration = (): void => {
-      restoreSelectionDecoration();
+      transcriptLayout?.gutter.setSelection(undefined);
       tui?.requestRender();
     };
 
@@ -444,7 +546,7 @@ export default function transcriptFocus(pi: ExtensionAPI): void {
       if (!item) {
         selectedKey = undefined;
         selectedSemanticKey = undefined;
-        restoreSelectionDecoration();
+        transcriptLayout?.gutter.setSelection(undefined);
         return undefined;
       }
 
@@ -550,7 +652,7 @@ export default function transcriptFocus(pi: ExtensionAPI): void {
       // Pi currently keeps the active layout frame private. When available, use
       // its primary ScrollView to reveal only as much as necessary. If that
       // implementation detail changes, fall back to moving the item to the top.
-      const scrollView = tui.currentLayout?.primaryScrollView;
+      const scrollView = activeScrollView();
       if (scrollView?.scrollTo && scrollView.viewportHeight > 0) {
         const viewportTop = scrollView.scrollTop;
         const viewportBottom = viewportTop + scrollView.viewportHeight;
@@ -579,7 +681,7 @@ export default function transcriptFocus(pi: ExtensionAPI): void {
     const viewportBounds = (): { top: number; bottom: number } | undefined => {
       if (!tui) return undefined;
 
-      const scrollView = tui.currentLayout?.primaryScrollView;
+      const scrollView = activeScrollView();
       if (scrollView && scrollView.viewportHeight > 0) {
         return {
           top: scrollView.scrollTop,
@@ -748,13 +850,11 @@ export default function transcriptFocus(pi: ExtensionAPI): void {
       tui = nextTui as FullscreenTui;
       editor = previousFactory(nextTui, theme, keybindings) as PiVimEditor;
 
-      // Install the permanent transcript gutter as soon as Pi mounts the editor,
-      // before initial session messages are rendered. Tab should only toggle
-      // focus/selection; it must never introduce a new layout column.
-      if (tui.mode === "fullscreen") {
+      // Install the gutter beside Pi's transcript ScrollView before initial
+      // session messages are rendered. The transcript itself stays untouched;
+      // scrolling therefore keeps Pi's normal render path and performance.
+      if (tui.mode === "fullscreen" && installTranscriptLayout()) {
         refreshTranscriptItems();
-        tui.invalidate();
-        tui.requestRender();
       }
 
       return editor;
@@ -905,7 +1005,7 @@ export default function transcriptFocus(pi: ExtensionAPI): void {
       exReturnArmed = false;
       clearSelection();
       transcriptItemsCache = undefined;
-      restoreTranscriptGutter();
+      restoreTranscriptLayout();
 
       ctx.ui.setStatus("pi-tab-focus", undefined);
 
