@@ -6,17 +6,31 @@
   "version": "1.0.0",
   "description": "Crush-style fullscreen transcript focus mode for Pi and pi-vim",
   "license": "ISC",
-  "author": "",
   "type": "module",
   "main": "./src/index.ts",
+  "files": [
+    "src/index.ts",
+    "README.md",
+    "LICENSE"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/philvernon/pi-tab-focus.git"
+  },
+  "bugs": {
+    "url": "https://github.com/philvernon/pi-tab-focus/issues"
+  },
+  "homepage": "https://github.com/philvernon/pi-tab-focus#readme",
+  "engines": {
+    "node": ">=22.19.0"
+  },
   "scripts": {
-    "build": "node --experimental-strip-types src/index.ts",
-    "test": "node --experimental-strip-types src/index.ts"
+    "test": "node --experimental-strip-types --test src/index.test.ts",
+    "prepack": "npm test"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
-    "@earendil-works/pi-tui": "*",
-    "pi-vim": "*"
+    "@earendil-works/pi-tui": "*"
   },
   "pi": {
     "extensions": [
@@ -25,7 +39,6 @@
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "^0.85.1",
-    "@earendil-works/pi-tui": "^0.85.1",
-    "pi-vim": "^0.14.2"
+    "@earendil-works/pi-tui": "^0.85.1"
   }
 }

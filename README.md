@@ -4,13 +4,20 @@ Crush-style transcript focus mode for Pi, designed to compose with `pi-vim` with
 
 ## Installation
 
-Add both packages to Pi's `settings.json`, with `pi-vim` before `pi-tab-focus`:
+Install `pi-vim` first, then this package so Pi preserves the required package order:
+
+```sh
+pi install npm:pi-vim
+pi install git:github.com/philvernon/pi-tab-focus
+```
+
+Equivalent `settings.json` ordering:
 
 ```json
 {
   "packages": [
     "npm:pi-vim",
-    "/Users/phil/dev-trash/pi-tab-focus"
+    "git:github.com/philvernon/pi-tab-focus"
   ]
 }
 ```
@@ -23,7 +30,7 @@ Run Pi in fullscreen TUI mode:
 pi --tui-mode fullscreen
 ```
 
-Use `/reload` after changing the package.
+Use `/reload` after changing the package. The current development baseline is Pi 0.85.1 and pi-vim 0.14.2.
 
 ## Keys
 
@@ -53,3 +60,12 @@ Pi 0.85.1 exposes fullscreen line/page scrolling and semantic prompt jumps but d
 For that reason `Shift+J/K` currently selects **user prompts**, not every rendered transcript block, and logical prompt selection is only best-effort aligned with Pi's viewport prompt jump. `y/c` copies the logically selected prompt.
 
 Implementing exact Crush-style selection of assistant messages and individual tool calls requires a Pi API that exposes rendered transcript items and their viewport row bounds.
+
+## Development
+
+```sh
+npm ci
+npm test
+```
+
+The test suite covers transcript focus entry/exit, fullscreen scrolling, semantic prompt navigation, EX-mode detours and session cleanup.

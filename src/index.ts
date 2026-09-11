@@ -66,7 +66,17 @@ function displayedUserPrompts(ctx: TranscriptContext): PromptItem[] {
 }
 
 export default function transcriptFocus(pi: ExtensionAPI): void {
+  let cleanupSession: (() => void) | undefined;
+
+  pi.on("session_shutdown", () => {
+    cleanupSession?.();
+    cleanupSession = undefined;
+  });
+
   pi.on("session_start", (_event, ctx) => {
+    cleanupSession?.();
+    cleanupSession = undefined;
+
     const previousFactory = ctx.ui.getEditorComponent();
     if (!previousFactory) {
       ctx.ui.notify(
@@ -222,7 +232,7 @@ export default function transcriptFocus(pi: ExtensionAPI): void {
 
     // Transcript focus is an input mode, not an editor implementation. Handle it
     // before input reaches pi-vim and consume only keys owned by transcript mode.
-    ctx.ui.onTerminalInput((data) => {
+    const unsubscribeTerminalInput = ctx.ui.onTerminalInput((data) => {
       // Raw input listeners see Kitty key-release events before component-level
       // filtering. Never treat a release as a second transcript-mode command.
       if (isKeyRelease(data)) {
@@ -343,5 +353,21 @@ export default function transcriptFocus(pi: ExtensionAPI): void {
       // input accidentally edit the prompt underneath it.
       return { consume: true };
     });
+
+    cleanupSession = () => {
+      unsubscribeTerminalInput();
+
+      if (exReturnCheck !== undefined) {
+        clearTimeout(exReturnCheck);
+        exReturnCheck = undefined;
+      }
+
+      exDetour = false;
+      exReturnArmed = false;
+      ctx.ui.setStatus("pi-tab-focus", undefined);
+
+      if (focused && tui && editor) tui.setFocus(editor);
+      focused = false;
+    };
   });
 }
