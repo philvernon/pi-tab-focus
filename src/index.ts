@@ -17,7 +17,14 @@ import {
 
 type PiVimEditor = EditorComponent & {
   getMode?: () => string;
+  actionHandlers?: Map<string, () => void>;
 };
+
+type AppKeybindings = {
+  matches?: (data: string, keybinding: string) => boolean;
+};
+
+type ClipboardWriter = (text: string) => Promise<void>;
 
 type PrivateScrollView = Component & {
   scrollTop: number;
@@ -103,6 +110,7 @@ const LAYOUT_NODE = Symbol.for("@earendil-works/pi-tui/layout-node");
 const TRANSCRIPT_GUTTER_WIDTH = 1;
 const PROMPT_SELECTION_MARKER = "\x1b[38;2;255;121;198m┃\x1b[39m";
 const RESPONSE_SELECTION_MARKER = "\x1b[38;2;92;196;147m┃\x1b[39m";
+const TRANSCRIPT_LAYOUT_ACTIONS = ["app.tools.expand", "app.thinking.toggle"] as const;
 
 const TRANSCRIPT_COMPONENT_KINDS: Record<string, TranscriptItemKind> = {
   UserMessageComponent: "prompt",
@@ -301,8 +309,19 @@ function findMountedTranscriptContainer(
   };
 }
 
-export default function transcriptFocus(pi: ExtensionAPI): void {
+export default function transcriptFocus(
+  pi: ExtensionAPI,
+  writeClipboard: ClipboardWriter = copyToClipboard,
+): void {
   let cleanupSession: (() => void) | undefined;
+  let refreshActiveTranscript: (() => void) | undefined;
+
+  const scheduleTranscriptRefresh = (): void => {
+    setTimeout(() => refreshActiveTranscript?.(), 0);
+  };
+
+  pi.on("message_end", scheduleTranscriptRefresh);
+  pi.on("tool_execution_end", scheduleTranscriptRefresh);
 
   pi.on("session_shutdown", () => {
     cleanupSession?.();
@@ -324,6 +343,7 @@ export default function transcriptFocus(pi: ExtensionAPI): void {
 
     let tui: FullscreenTui | undefined;
     let editor: PiVimEditor | undefined;
+    let appKeybindings: AppKeybindings | undefined;
     let focused = false;
     let selectedKey: string | undefined;
     let selectedSemanticKey: string | undefined;
@@ -556,6 +576,18 @@ export default function transcriptFocus(pi: ExtensionAPI): void {
       return item;
     };
 
+    const refreshSelectionGeometry = (): void => {
+      transcriptItemsCache = undefined;
+      if (!focused && !exDetour) return;
+
+      const items = refreshTranscriptItems();
+      const selected = selectedItemFrom(items);
+      if (selected) showSelection(selected);
+      tui?.requestRender();
+    };
+
+    refreshActiveTranscript = refreshSelectionGeometry;
+
     const updateStatus = (): void => {
       if (!focused) {
         ctx.ui.setStatus("pi-tab-focus", undefined);
@@ -640,20 +672,20 @@ export default function transcriptFocus(pi: ExtensionAPI): void {
       }, 0);
     };
 
+    const effectiveViewportHeight = (): number => {
+      if (!tui) return 1;
+      const viewportHeight = activeScrollView()?.viewportHeight;
+      return viewportHeight && viewportHeight > 0
+        ? viewportHeight
+        : Math.max(1, tui.terminal.rows - 5);
+    };
+
     const page = (direction: -1 | 1): void => {
-      if (!tui) return;
-      const lines = Math.max(1, tui.terminal.rows - 5);
-      tui.scrollBy?.(direction * lines);
+      tui?.scrollBy?.(direction * effectiveViewportHeight());
     };
 
     const halfPage = (direction: -1 | 1): void => {
-      if (!tui) return;
-      const viewportHeight = activeScrollView()?.viewportHeight;
-      const pageHeight =
-        viewportHeight && viewportHeight > 0
-          ? viewportHeight
-          : Math.max(1, tui.terminal.rows - 5);
-      tui.scrollBy?.(direction * Math.max(1, Math.floor(pageHeight / 2)));
+      tui?.scrollBy?.(direction * Math.max(1, Math.floor(effectiveViewportHeight() / 2)));
     };
 
     const revealItem = (item: TranscriptItem): void => {
@@ -702,7 +734,7 @@ export default function transcriptFocus(pi: ExtensionAPI): void {
       const top = tui.viewportTop ?? 0;
       return {
         top,
-        bottom: top + Math.max(1, tui.terminal.rows - 5),
+        bottom: top + effectiveViewportHeight(),
       };
     };
 
@@ -840,10 +872,8 @@ export default function transcriptFocus(pi: ExtensionAPI): void {
 
       const text = selected.text;
       const kind = selected.kind;
-      tui?.invalidate();
-      tui?.requestRender();
 
-      void copyToClipboard(text).then(
+      void writeClipboard(text).then(
         () => ctx.ui.notify(`Copied selected ${kind}.`, "info"),
         (error: unknown) =>
           ctx.ui.notify(
@@ -858,6 +888,7 @@ export default function transcriptFocus(pi: ExtensionAPI): void {
     // extension shortcuts and any future CustomEditor surface directly.
     ctx.ui.setEditorComponent((nextTui, theme, keybindings) => {
       tui = nextTui as FullscreenTui;
+      appKeybindings = keybindings as AppKeybindings;
       editor = previousFactory(nextTui, theme, keybindings) as PiVimEditor;
 
       // Install the gutter beside Pi's transcript ScrollView before initial
@@ -963,6 +994,19 @@ export default function transcriptFocus(pi: ExtensionAPI): void {
         return { consume: true };
       }
 
+      const transcriptLayoutAction = TRANSCRIPT_LAYOUT_ACTIONS.find((action) =>
+        appKeybindings?.matches?.(data, action),
+      );
+      if (transcriptLayoutAction) {
+        if (!isKeyRepeat(data)) {
+          const handler = editor?.actionHandlers?.get(transcriptLayoutAction);
+          if (handler) handler();
+          else editor?.handleInput(data);
+          refreshSelectionGeometry();
+        }
+        return { consume: true };
+      }
+
       if (
         data === "J" ||
         matchesKey(data, Key.shift("j")) ||
@@ -1028,6 +1072,7 @@ export default function transcriptFocus(pi: ExtensionAPI): void {
       clearSelection();
       transcriptItemsCache = undefined;
       restoreTranscriptLayout();
+      if (refreshActiveTranscript === refreshSelectionGeometry) refreshActiveTranscript = undefined;
 
       ctx.ui.setStatus("pi-tab-focus", undefined);
 

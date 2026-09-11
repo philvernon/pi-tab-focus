@@ -47,6 +47,8 @@ Use `/reload` after changing the package. The current development baseline is Pi
 | `f`, `PgDn` | page down |
 | `g`, `Home` | top |
 | `G`, `End` | bottom |
+| `Ctrl+O` (or configured `app.tools.expand` binding) | toggle Pi tool-output expansion and refresh transcript geometry |
+| `Ctrl+T` (or configured `app.thinking.toggle` binding) | toggle Pi thinking visibility and refresh transcript geometry |
 | `y`, `c` | copy selected transcript item using Pi's clipboard helper |
 | `:` | temporarily enter pi-vim EX mode, then return to transcript focus when the command/cancel path finishes; `Tab` cancels EX and returns immediately |
 | `Esc` | leave transcript mode |
@@ -61,7 +63,7 @@ Entering transcript mode automatically selects the bottom-most visible item unle
 
 ## Pi API compatibility note
 
-Pi 0.85.1 does not expose a public transcript-item/viewport API. Item discovery therefore uses Pi's mounted component tree. The permanent gutter is composed beside Pi's existing fullscreen transcript `ScrollView`, while smooth "reveal selected item" scrolling uses its private viewport state when available. Those private layout reads are guarded; if the layout shape changes, the extension degrades without rewriting transcript content.
+Pi 0.85.1 does not expose a public transcript-item/viewport API. Item discovery therefore uses Pi's mounted component tree. The permanent gutter is composed beside Pi's existing fullscreen transcript `ScrollView`, while smooth "reveal selected item" scrolling uses its private viewport state when available. Those private layout reads are guarded, and the package peer range is intentionally constrained to the Pi 0.85.x API line (`^0.85.1`) so incompatible private-layout changes are not silently accepted.
 
 ## Development
 
@@ -70,4 +72,4 @@ npm ci
 npm test
 ```
 
-The test suite covers transcript focus entry/exit, viewport-following selection, item ordering/highlighting across prompts/messages/tools, EX-mode detours and session cleanup.
+The test suite covers transcript focus entry/exit, viewport-following selection, all supported transcript item kinds, gutter rendering, copy mappings, Pi layout-changing actions, completion-triggered geometry refresh, EX-mode detours and session cleanup.

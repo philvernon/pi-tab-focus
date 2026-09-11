@@ -14,6 +14,7 @@ type HarnessOptions = {
   initialScrollTop?: number;
   viewportHeight?: number;
   paddedPrompts?: boolean;
+  extraKinds?: boolean;
 };
 
 class FakeContainer {
@@ -125,7 +126,12 @@ class ToolExecutionComponent extends FakeText {
   }
 }
 
-function createTranscriptTree(paddedPrompts = false) {
+class BashExecutionComponent extends FakeText {}
+class SkillInvocationMessageComponent extends FakeText {}
+class CompactionSummaryMessageComponent extends FakeText {}
+class CustomMessageComponent extends FakeText {}
+
+function createTranscriptTree(paddedPrompts = false, extraKinds = false) {
   const prompt = new UserMessageComponent("hello", paddedPrompts);
   const reply = new AssistantMessageComponent("hi, how can i help?");
   const updatePrompt = new UserMessageComponent("update the file", paddedPrompts);
@@ -139,6 +145,11 @@ function createTranscriptTree(paddedPrompts = false) {
     "Edit | ~/.config/crush/crushrc",
   );
   const done = new AssistantMessageComponent("Done. Edited file");
+  const bash = new BashExecutionComponent([" $ npm test"]);
+  const skill = new SkillInvocationMessageComponent([" [skill] review"]);
+  const summary = new CompactionSummaryMessageComponent([" Compacted summary"]);
+  const custom = new CustomMessageComponent([" Custom transcript entry"]);
+  const extras = extraKinds ? [bash, skill, summary, custom] : [];
 
   const chat = new FakeContainer([
     prompt,
@@ -150,6 +161,7 @@ function createTranscriptTree(paddedPrompts = false) {
     glob,
     edit,
     done,
+    ...extras,
   ]);
   const document = new FakeContainer([
     new FakeText(["header"]),
@@ -167,6 +179,10 @@ function createTranscriptTree(paddedPrompts = false) {
     glob,
     edit,
     done,
+    bash,
+    skill,
+    summary,
+    custom,
   };
 }
 
@@ -175,6 +191,7 @@ function createHarness(options: HarnessOptions = {}) {
   const statuses = new Map<string, string | undefined>();
   const notifications: Array<{ message: string; type?: string }> = [];
   const editorInputs: string[] = [];
+  const copiedTexts: string[] = [];
   const focusHistory: unknown[] = [];
   const scrollBy: number[] = [];
   const scrollTo: number[] = [];
@@ -187,10 +204,19 @@ function createHarness(options: HarnessOptions = {}) {
   let unsubscribed = false;
   let invalidations = 0;
   let renderRequests = 0;
+  let toolExpandCalls = 0;
+  let thinkingToggleCalls = 0;
 
-  const transcript = createTranscriptTree(options.paddedPrompts ?? false);
+  const transcript = createTranscriptTree(
+    options.paddedPrompts ?? false,
+    options.extraKinds ?? false,
+  );
 
   const editor = {
+    actionHandlers: new Map<string, () => void>([
+      ["app.tools.expand", () => toolExpandCalls++],
+      ["app.thinking.toggle", () => thinkingToggleCalls++],
+    ]),
     handleInput(data: string) {
       editorInputs.push(data);
     },
@@ -300,16 +326,28 @@ function createHarness(options: HarnessOptions = {}) {
     },
   };
 
-  transcriptFocus({
-    on(event: string, handler: Handler) {
-      handlers.set(event, handler);
+  transcriptFocus(
+    {
+      on(event: string, handler: Handler) {
+        handlers.set(event, handler);
+      },
+    } as any,
+    async (text) => {
+      copiedTexts.push(text);
     },
-  } as any);
+  );
 
   const start = () => {
     handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, ctx);
     if (editorFactory) {
-      const installedEditor = editorFactory(tui, {}, {});
+      const installedEditor = editorFactory(tui, {}, {
+        matches(data: string, action: string) {
+          return (
+            (action === "app.tools.expand" && data === "\x0f") ||
+            (action === "app.thinking.toggle" && data === "\x14")
+          );
+        },
+      });
       focusedComponent = installedEditor;
     }
   };
@@ -324,8 +362,12 @@ function createHarness(options: HarnessOptions = {}) {
     handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, ctx);
   };
 
+  const emit = (event: string) => {
+    handlers.get(event)?.({ type: event }, ctx);
+  };
+
   const renderedTranscriptLine = (component: FakeText): string => {
-    const width = 98;
+    const width = 99;
     let row = transcript.document.children[0].render(width).length;
     row += transcript.document.children[1].render(width).length;
 
@@ -356,8 +398,10 @@ function createHarness(options: HarnessOptions = {}) {
   };
 
   return {
+    copiedTexts,
     editor,
     editorInputs,
+    emit,
     focusHistory,
     input,
     notifications,
@@ -406,6 +450,12 @@ function createHarness(options: HarnessOptions = {}) {
     get renderRequests() {
       return renderRequests;
     },
+    get toolExpandCalls() {
+      return toolExpandCalls;
+    },
+    get thinkingToggleCalls() {
+      return thinkingToggleCalls;
+    },
   };
 }
 
@@ -445,10 +495,47 @@ test("transcript navigation consumes keys and drives fullscreen scrolling", () =
   h.input("g");
   h.input("G");
 
-  assert.deepEqual(h.scrollBy, [1, -1, -2, 2, -25, 25]);
+  assert.deepEqual(h.scrollBy, [1, -1, -2, 2, -4, 4]);
   assert.equal(h.scrollTopCalls, 1);
   assert.equal(h.scrollBottomCalls, 1);
   assert.deepEqual(h.editorInputs, []);
+});
+
+test("layout-changing Pi actions work in transcript mode and refresh geometry", () => {
+  const h = createHarness({ initialScrollTop: 0 });
+  h.start();
+  h.input("\t");
+
+  const rendersBefore = h.transcriptRenderCount();
+  assert.deepEqual(h.input("\x0f"), { consume: true });
+
+  assert.equal(h.toolExpandCalls, 1);
+  assert.ok(h.transcriptRenderCount() > rendersBefore);
+
+  const rendersBeforeThinking = h.transcriptRenderCount();
+  assert.deepEqual(h.input("\x14"), { consume: true });
+  assert.equal(h.thinkingToggleCalls, 1);
+  assert.ok(h.transcriptRenderCount() > rendersBeforeThinking);
+
+  assert.deepEqual(h.editorInputs, []);
+  assert.match(h.statuses.get("pi-tab-focus") ?? "", /message 2\/6/);
+});
+
+test("completed message and tool events refresh cached transcript geometry", async () => {
+  const h = createHarness({ initialScrollTop: 0 });
+  h.start();
+  h.input("\t");
+
+  const beforeMessageEnd = h.transcriptRenderCount();
+  h.emit("message_end");
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  const afterMessageEnd = h.transcriptRenderCount();
+  assert.ok(afterMessageEnd > beforeMessageEnd);
+
+  h.emit("tool_execution_end");
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  assert.ok(h.transcriptRenderCount() > afterMessageEnd);
+  assert.match(h.renderedFirstVisibleLine(h.transcript.reply), /^│/);
 });
 
 test("line scrolling reuses cached transcript rows while selection remains visible", () => {
@@ -565,6 +652,37 @@ test("Shift navigation selects every rendered prompt, message and tool item in o
   assert.match(h.statuses.get("pi-tab-focus") ?? "", /tool 5\/6/);
   assert.match(h.renderedFirstVisibleLine(h.transcript.edit), /^│/);
   assert.doesNotMatch(h.renderedFirstVisibleLine(h.transcript.done), /^│/);
+});
+
+test("remaining selectable transcript kinds are classified and navigable", () => {
+  const h = createHarness({ extraKinds: true, initialScrollTop: 0, viewportHeight: 100 });
+  h.start();
+  h.input("\t");
+
+  assert.match(h.statuses.get("pi-tab-focus") ?? "", /custom 10\/10/);
+  h.input("K");
+  assert.match(h.statuses.get("pi-tab-focus") ?? "", /summary 9\/10/);
+  h.input("K");
+  assert.match(h.statuses.get("pi-tab-focus") ?? "", /skill 8\/10/);
+  h.input("K");
+  assert.match(h.statuses.get("pi-tab-focus") ?? "", /bash 7\/10/);
+});
+
+test("copy mappings copy the selected item's unhighlighted rendered text", () => {
+  const h = createHarness({ initialScrollTop: 7 });
+  h.start();
+  h.input("\t");
+  h.input("K");
+  h.input("K");
+
+  assert.match(h.statuses.get("pi-tab-focus") ?? "", /tool 4\/6/);
+  assert.deepEqual(h.input("c"), { consume: true });
+  assert.deepEqual(h.input("y"), { consume: true });
+  assert.deepEqual(h.copiedTexts, [
+    "Glob | (path=/Users/phil/.config/crush)",
+    "Glob | (path=/Users/phil/.config/crush)",
+  ]);
+  assert.deepEqual(h.editorInputs, []);
 });
 
 test("selection adds one blank gutter row above and below visible item content", () => {
