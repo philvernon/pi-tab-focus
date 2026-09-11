@@ -1,0 +1,31 @@
+{
+  "name": "pi-tab-focus",
+  "keywords": [
+    "pi-package"
+  ],
+  "version": "1.0.0",
+  "description": "Crush-style fullscreen transcript focus mode for Pi and pi-vim",
+  "license": "ISC",
+  "author": "",
+  "type": "module",
+  "main": "./src/index.ts",
+  "scripts": {
+    "build": "node --experimental-strip-types src/index.ts",
+    "test": "node --experimental-strip-types src/index.ts"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "pi-vim": "*"
+  },
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.85.1",
+    "@earendil-works/pi-tui": "^0.85.1",
+    "pi-vim": "^0.14.2"
+  }
+}
