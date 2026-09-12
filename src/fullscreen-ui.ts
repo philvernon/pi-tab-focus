@@ -1,49 +1,81 @@
-import type { Component } from "@earendil-works/pi-tui";
-
-type TextStyle = (text: string) => string;
-
 type ScrollIndicatorTui = {
   mode: string;
   scrollToEndIndicator?: () => string;
 };
 
-export const FOCUS_INDICATOR_WIDTH = 2;
+type BorderRenderer = (width: number, hiddenLineCount: number) => string;
 
-class FocusIndicatorComponent implements Component {
-  private readonly isEditorFocused: () => boolean;
-  private readonly activeStyle: TextStyle;
-  private readonly inactiveStyle: TextStyle;
+type BorderRenderableEditor = object & {
+  renderTopBorder?: BorderRenderer;
+  renderBottomBorder?: BorderRenderer;
+};
 
-  constructor(
-    isEditorFocused: () => boolean,
-    activeStyle: TextStyle,
-    inactiveStyle: TextStyle,
+const DASHED_BORDER_GLYPH = "·";
+const SOLID_BORDER_GLYPH = "─";
+
+function patchBorderRenderer(
+  editor: BorderRenderableEditor,
+  key: "renderTopBorder" | "renderBottomBorder",
+  isTranscriptFocused: () => boolean,
+): (() => void) | undefined {
+  const original = editor[key];
+  if (typeof original !== "function") return undefined;
+
+  const hadOwnProperty = Object.prototype.hasOwnProperty.call(editor, key);
+  const ownDescriptor = hadOwnProperty
+    ? Object.getOwnPropertyDescriptor(editor, key)
+    : undefined;
+
+  const wrapped: BorderRenderer = function(
+    this: BorderRenderableEditor,
+    width,
+    hiddenLineCount,
   ) {
-    this.isEditorFocused = isEditorFocused;
-    this.activeStyle = activeStyle;
-    this.inactiveStyle = inactiveStyle;
+    const rendered = original.call(this, width, hiddenLineCount);
+    return isTranscriptFocused()
+      ? rendered.replaceAll(SOLID_BORDER_GLYPH, DASHED_BORDER_GLYPH)
+      : rendered;
+  };
+
+  try {
+    Object.defineProperty(editor, key, {
+      configurable: true,
+      writable: true,
+      value: wrapped,
+    });
+  } catch {
+    return undefined;
   }
 
-  render(_width: number): string[] {
-    const editorFocused = this.isEditorFocused();
-    const marker = editorFocused ? "●" : "·";
-    const style = editorFocused ? this.activeStyle : this.inactiveStyle;
-    return [style(marker)];
-  }
+  return () => {
+    // Avoid clobbering a later decorator that replaced this method after us.
+    if (editor[key] !== wrapped) return;
 
-  invalidate(): void { }
+    if (hadOwnProperty && ownDescriptor) {
+      Object.defineProperty(editor, key, ownDescriptor);
+    } else {
+      delete editor[key];
+    }
+  };
 }
 
-export function createFocusIndicator(
-  isEditorFocused: () => boolean,
-  activeStyle: TextStyle,
-  inactiveStyle: TextStyle,
-): Component {
-  return new FocusIndicatorComponent(
-    isEditorFocused,
-    activeStyle,
-    inactiveStyle,
-  );
+export function installTranscriptEditorBorderStyle(
+  editor: object,
+  isTranscriptFocused: () => boolean,
+): (() => void) | undefined {
+  const target = editor as BorderRenderableEditor;
+  const restorers = [
+    patchBorderRenderer(target, "renderTopBorder", isTranscriptFocused),
+    patchBorderRenderer(target, "renderBottomBorder", isTranscriptFocused),
+  ].filter((restore): restore is () => void => restore !== undefined);
+
+  if (restorers.length === 0) return undefined;
+
+  return () => {
+    for (let index = restorers.length - 1; index >= 0; index--) {
+      restorers[index]();
+    }
+  };
 }
 
 export function suppressDefaultScrollIndicator(

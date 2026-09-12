@@ -22,8 +22,7 @@ import {
 } from "@earendil-works/pi-tui";
 import { resolveConfig } from "./config.ts";
 import {
-  FOCUS_INDICATOR_WIDTH,
-  createFocusIndicator,
+  installTranscriptEditorBorderStyle,
   suppressDefaultScrollIndicator,
 } from "./fullscreen-ui.ts";
 import {
@@ -483,6 +482,7 @@ export default function transcriptFocus(
     let transcriptContentHeight: number | undefined;
     let transcriptLayout: TranscriptLayoutInstallation | undefined;
     let restoreScrollIndicator: (() => void) | undefined;
+    let restoreEditorBorderStyle: (() => void) | undefined;
     let visualSourceRevision = 0;
     const visualLineCache = new Map<number, VimCell[]>();
     const componentKeys = new WeakMap<object, string>();
@@ -605,10 +605,7 @@ export default function transcriptFocus(
       };
     };
 
-    const installTranscriptLayout = (
-      activeIndicatorStyle: (text: string) => string,
-      inactiveIndicatorStyle: (text: string) => string,
-    ): boolean => {
+    const installTranscriptLayout = (): boolean => {
       if (!tui || tui.mode !== "fullscreen") return false;
       if (transcriptLayout) return true;
       if (!tui.setLayoutRoot) return false;
@@ -664,62 +661,11 @@ export default function transcriptFocus(
         ],
         { align: "stretch" },
       );
-      // Decorate only Pi's footer slot. The footer component itself is opaque: this
-      // works the same whether Pi or any extension is rendering that slot.
-      const dockIndex = rootNode.entries.findIndex(
-        (_entry, index) => index !== transcriptIndex,
+      const rootEntries = rootNode.entries.map((entry, index) =>
+        index === transcriptIndex
+          ? { ...entry, component: transcriptPane }
+          : { ...entry },
       );
-      const dockNode =
-        dockIndex >= 0
-          ? privateLayoutNode(rootNode.entries[dockIndex].component)
-          : undefined;
-      let decoratedDock: Component | undefined;
-
-      if (dockNode?.type === "vstack" && dockNode.entries.length > 0) {
-        const footerIndex = dockNode.entries.length - 1;
-        const focusIndicator = createFocusIndicator(
-          () => tui?.getFocusedComponent?.() === editor,
-          activeIndicatorStyle,
-          inactiveIndicatorStyle,
-        );
-        const footerPane = new HStack(
-          [
-            {
-              component: focusIndicator,
-              basis: FOCUS_INDICATOR_WIDTH,
-              grow: 0,
-              shrink: 0,
-              minSize: FOCUS_INDICATOR_WIDTH,
-              maxSize: FOCUS_INDICATOR_WIDTH,
-            },
-            {
-              component: dockNode.entries[footerIndex].component,
-              basis: 0,
-              grow: 1,
-              shrink: 1,
-              minSize: 1,
-            },
-          ],
-          { align: "end" },
-        );
-        const dockEntries = dockNode.entries.map((entry, index) =>
-          index === footerIndex
-            ? { ...entry, component: footerPane }
-            : { ...entry },
-        );
-        decoratedDock = new VStack(dockEntries, {
-          gap: dockNode.gap,
-          align: dockNode.align,
-        });
-      }
-
-      const rootEntries = rootNode.entries.map((entry, index) => {
-        if (index === transcriptIndex)
-          return { ...entry, component: transcriptPane };
-        if (index === dockIndex && decoratedDock)
-          return { ...entry, component: decoratedDock };
-        return { ...entry };
-      });
       const installedRoot = new VStack(rootEntries, {
         gap: rootNode.gap,
         align: rootNode.align,
@@ -1489,6 +1435,9 @@ export default function transcriptFocus(
     // Pi wires default editor callbacks, app actions, paste handling and extension
     // shortcuts onto returned CustomEditor instances.
     ctx.ui.setEditorComponent((nextTui, theme, keybindings) => {
+      restoreEditorBorderStyle?.();
+      restoreEditorBorderStyle = undefined;
+
       tui = nextTui as FullscreenTui;
       appKeybindings = keybindings as AppKeybindings;
       editor = (previousFactory
@@ -1497,21 +1446,19 @@ export default function transcriptFocus(
           embedWorkingStatus: true,
         })) as TranscriptEditor;
 
-      // Install the transcript gutter and a one-cell focus marker beside the
-      // bottom line of Pi's footer slot. The footer component itself is untouched.
+      // Keep Pi's editor rendering intact and only swap its horizontal border
+      // glyph while transcript mode is active. This preserves border colours,
+      // embedded working status, overflow labels and compatible custom editors.
       if (tui.mode === "fullscreen") {
+        restoreEditorBorderStyle = installTranscriptEditorBorderStyle(
+          editor,
+          () => focused,
+        );
         restoreScrollIndicator ??= suppressDefaultScrollIndicator(
           tui,
           hideDefaultScrollIndicator,
         );
-        if (
-          installTranscriptLayout(
-            theme.selectList.selectedPrefix,
-            theme.borderColor,
-          )
-        ) {
-          refreshTranscriptItems();
-        }
+        if (installTranscriptLayout()) refreshTranscriptItems();
       }
 
       return editor;
@@ -1725,6 +1672,8 @@ export default function transcriptFocus(
       restoreTranscriptLayout();
       restoreScrollIndicator?.();
       restoreScrollIndicator = undefined;
+      restoreEditorBorderStyle?.();
+      restoreEditorBorderStyle = undefined;
       if (focused && tui && editor) tui.setFocus(editor);
       ctx.ui.setEditorComponent(previousFactory);
       if (refreshActiveTranscript === refreshSelectionGeometry)

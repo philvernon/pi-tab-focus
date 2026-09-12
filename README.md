@@ -87,7 +87,7 @@ A trusted project can override the global value with `.pi/pi-tab-focus.json`. Th
 
 Transcript mode is implemented through Pi's `ctx.ui.onTerminalInput()` hook. With Pi's built-in editor, the package installs Pi's exported `CustomEditor`; Pi then wires the normal app actions, escape handling, image paste, autocomplete and extension shortcuts onto it. If a custom editor such as pi-vim is already registered, the package delegates to that editor's factory and returns its editor unchanged. pi-vim-specific EX integration is enabled only when the editor exposes the required mode API.
 
-The active transcript-mode hint is shown with `ctx.ui.setStatus()` rather than by modifying the editor. Fullscreen mode also places a one-character focus marker beside the bottom line of Pi's footer slot: accented `●` when the editor owns focus and muted `·` while transcript focus owns input. The marker is composed around the footer slot itself and does not depend on which component renders the footer.
+The active transcript-mode hint is shown with `ctx.ui.setStatus()`. The editor itself keeps Pi's normal border colour, including thinking-level and working-state colours; transcript mode only changes the horizontal border rule from solid `─` to dashed `╌`. Returning to editor focus restores the normal solid rule.
 
 `Shift+J/K` walks the rendered transcript item-by-item: user prompts, assistant messages, tool executions, bash entries, skill invocations, summaries and custom transcript entries. The transcript reserves a one-column Crush-style gutter from startup, before transcript focus is entered, so toggling transcript focus never moves its text. The gutter holds the heavy `┃` marker directly beside the transcript and spans visible item content plus at most one adjacent blank transcript row above and below, giving each selection the same padded Crush-style treatment without swallowing unrelated layout space. Prompt markers are pink and response/tool markers are green. `y/c` copies the unhighlighted rendered item.
 
@@ -97,7 +97,7 @@ Entering transcript mode automatically selects the bottom-most visible item unle
 
 ## Pi API compatibility note
 
-Pi 0.85.1 does not expose a public transcript-item/viewport API. Item discovery therefore uses Pi's mounted component tree. The permanent gutter and footer focus marker compose around Pi's private fullscreen layout, scroll-indicator suppression replaces Pi's private `scrollToEndIndicator` callback, smooth reveal scrolling uses private viewport state and visual selections use Pi's private fullscreen selection state. Those private accesses are guarded and restored during cleanup, and the package peer range is intentionally constrained to the Pi 0.85.x API line (`^0.85.1`) so incompatible private-layout changes are not silently accepted.
+Pi 0.85.1 does not expose a public transcript-item/viewport API. Item discovery therefore uses Pi's mounted component tree. The permanent gutter composes around Pi's private fullscreen layout, scroll-indicator suppression replaces Pi's private `scrollToEndIndicator` callback, the transcript-mode border style wraps the editor's guarded border-render methods, smooth reveal scrolling uses private viewport state and visual selections use Pi's private fullscreen selection state. Those private accesses are guarded and restored during cleanup, and the package peer range is intentionally constrained to the Pi 0.85.x API line (`^0.85.1`) so incompatible private-layout changes are not silently accepted.
 
 ## Development
 

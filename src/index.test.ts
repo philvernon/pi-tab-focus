@@ -242,7 +242,17 @@ function createHarness(options: HarnessOptions = {}) {
     getMode() {
       return "normal";
     },
+    renderTopBorder(width: number, hiddenLineCount: number) {
+      const label = hiddenLineCount > 0 ? ` ↑ ${hiddenLineCount} more ` : " work ";
+      const remaining = Math.max(0, width - label.length);
+      return `top:${"─".repeat(Math.floor(remaining / 2))}${label}${"─".repeat(Math.ceil(remaining / 2))}`;
+    },
+    renderBottomBorder(width: number) {
+      return `bottom:${"─".repeat(width)}`;
+    },
   };
+  const originalRenderTopBorder = editor.renderTopBorder;
+  const originalRenderBottomBorder = editor.renderBottomBorder;
 
   const sliceByColumns = (line: string, start: number, end: number): string => {
     const stripped = stripTerminalSequences(line);
@@ -296,12 +306,7 @@ function createHarness(options: HarnessOptions = {}) {
     maxScrollTop,
     (row) => scrollTo.push(row),
   );
-  const dockEditor = new FakeText(["editor"]);
-  const footer = new FakeText(["footer"]);
-  const dock = new FakeVStack([
-    { component: dockEditor, shrink: 1, minSize: 3 },
-    { component: footer, shrink: 1, minSize: 1 },
-  ]);
+  const dock = new FakeContainer();
   const originalLayoutRoot = new FakeVStack([
     { component: privateScrollView, basis: 0, grow: 1, shrink: 1, minSize: 1 },
     { component: dock, basis: "auto", grow: 0, shrink: 1, minSize: 1 },
@@ -543,23 +548,12 @@ function createHarness(options: HarnessOptions = {}) {
     return line.replace(/^┃/u, "│");
   };
 
-  const footerFocusIndicatorLines = (): string[] => {
-    const rootNode = layoutRoot?.[LAYOUT_NODE]?.();
-    const dockEntry = rootNode?.entries?.find((entry: any) => {
-      const node = entry.component?.[LAYOUT_NODE]?.();
-      return node?.type === "vstack";
-    });
-    const dockNode = dockEntry?.component?.[LAYOUT_NODE]?.();
-    const footerEntry = dockNode?.entries?.at(-1);
-    const footerNode = footerEntry?.component?.[LAYOUT_NODE]?.();
-    return footerNode?.entries?.[0]?.component?.render?.(1) ?? [];
-  };
-
   return {
     copiedTexts,
     editor,
     editorInputs,
-    footerFocusIndicatorLines,
+    originalRenderBottomBorder,
+    originalRenderTopBorder,
     emit,
     input,
     notifications,
@@ -632,21 +626,38 @@ function createHarness(options: HarnessOptions = {}) {
   };
 }
 
-test("fullscreen UI hides Pi's scroll indicator and marks focus on the footer's bottom line", () => {
+test("fullscreen UI hides Pi's scroll indicator and dashes editor borders in transcript mode", () => {
   const h = createHarness();
   h.start();
 
   assert.equal(h.scrollToEndIndicator, undefined);
-  assert.deepEqual(h.footerFocusIndicatorLines(), ["●"]);
+  assert.equal(
+    h.editor.renderTopBorder(16, 0),
+    `top:${"─".repeat(5)} work ${"─".repeat(5)}`,
+  );
+  assert.equal(h.editor.renderBottomBorder(8, 0), `bottom:${"─".repeat(8)}`);
 
   h.input("\t");
-  assert.deepEqual(h.footerFocusIndicatorLines(), ["·"]);
+  assert.equal(
+    h.editor.renderTopBorder(16, 0),
+    `top:${"╌".repeat(5)} work ${"╌".repeat(5)}`,
+  );
+  assert.equal(h.editor.renderBottomBorder(8, 0), `bottom:${"╌".repeat(8)}`);
+  assert.equal(
+    h.editor.renderTopBorder(18, 3),
+    `top:${"╌".repeat(4)} ↑ 3 more ${"╌".repeat(4)}`,
+  );
 
   h.input("\t");
-  assert.deepEqual(h.footerFocusIndicatorLines(), ["●"]);
+  assert.equal(
+    h.editor.renderTopBorder(16, 0),
+    `top:${"─".repeat(5)} work ${"─".repeat(5)}`,
+  );
 
   h.shutdown();
   assert.equal(h.scrollToEndIndicator, h.defaultScrollToEndIndicator);
+  assert.equal(h.editor.renderTopBorder, h.originalRenderTopBorder);
+  assert.equal(h.editor.renderBottomBorder, h.originalRenderBottomBorder);
   assert.equal(h.layoutRoot, h.originalLayoutRoot);
 });
 
