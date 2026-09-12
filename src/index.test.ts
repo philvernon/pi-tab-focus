@@ -447,8 +447,13 @@ function createHarness(options: HarnessOptions = {}) {
 
   const input = (data: string) => {
     const result = terminalHandler?.(data);
-    if (!result?.consume && focusedComponent === installedEditor)
-      installedEditor?.handleInput(data);
+    if (
+      !result?.consume &&
+      focusedComponent &&
+      typeof (focusedComponent as any).handleInput === "function"
+    ) {
+      (focusedComponent as any).handleInput(data);
+    }
     return result;
   };
 
@@ -526,6 +531,9 @@ function createHarness(options: HarnessOptions = {}) {
     scrollTo,
     setOverlay(value: boolean) {
       overlay = value;
+    },
+    setFocusedComponent(component: unknown) {
+      focusedComponent = component;
     },
     shutdown,
     start,
@@ -620,6 +628,72 @@ test("transcript navigation consumes keys and drives fullscreen scrolling", () =
   assert.equal(h.scrollTopCalls, 1);
   assert.equal(h.scrollBottomCalls, 1);
   assert.deepEqual(h.editorInputs, []);
+});
+
+test("focused Pi/custom UI owns input before transcript mode is entered", () => {
+  const h = createHarness({ initialScrollTop: 0 });
+  h.start();
+
+  const promptInputs: string[] = [];
+  const prompt = {
+    handleInput(data: string) {
+      promptInputs.push(data);
+    },
+  };
+  h.setFocusedComponent(prompt);
+
+  assert.equal(h.input("\t"), undefined);
+  assert.deepEqual(promptInputs, ["\t"]);
+  assert.equal(h.focusedComponent, prompt);
+  assert.equal(h.statuses.get("pi-tab-focus"), undefined);
+});
+
+test("focused Pi/custom UI receives input while transcript mode is active", () => {
+  const h = createHarness({ initialScrollTop: 0 });
+  h.start();
+  h.input("\t");
+
+  const promptInputs: string[] = [];
+  const prompt = {
+    handleInput(data: string) {
+      promptInputs.push(data);
+    },
+  };
+  h.setFocusedComponent(prompt);
+
+  assert.equal(h.input("j"), undefined);
+  assert.equal(h.input("\t"), undefined);
+  assert.deepEqual(promptInputs, ["j", "\t"]);
+  assert.deepEqual(h.scrollBy, []);
+  assert.equal(h.focusedComponent, prompt);
+
+  // Pi restores the editor after the prompt closes. Transcript mode remains
+  // logically active and reclaims its null-focus state on the next owned key.
+  h.setFocusedComponent(h.installedEditor);
+  assert.deepEqual(h.input("j"), { consume: true });
+  assert.equal(h.focusedComponent, null);
+  assert.deepEqual(h.scrollBy, [1]);
+});
+
+test("overlay presence alone does not suspend transcript input", () => {
+  const h = createHarness({ initialScrollTop: 0 });
+  h.start();
+  h.input("\t");
+  h.setOverlay(true);
+
+  assert.deepEqual(h.input("j"), { consume: true });
+  assert.equal(h.focusedComponent, null);
+  assert.deepEqual(h.scrollBy, [1]);
+});
+
+test("transcript mode leaves unowned raw shortcuts unconsumed", () => {
+  const h = createHarness({ initialScrollTop: 0 });
+  h.start();
+  h.input("\t");
+
+  assert.equal(h.input("\x1d"), undefined);
+  assert.equal(h.focusedComponent, null);
+  assert.deepEqual(h.scrollBy, []);
 });
 
 test("Ctrl+D shuts down and Ctrl+C returns control to Pi", () => {
@@ -1118,6 +1192,30 @@ test(": temporarily enters pi-vim EX and preserves the selected item on return",
   assert.equal(h.focusedComponent, null);
   assert.match(h.statuses.get("pi-tab-focus") ?? "", /message 2\/6/);
   assert.match(h.renderedFirstVisibleLine(h.transcript.reply), /^│/);
+});
+
+test(": preserves visual selection across the pi-vim EX detour", async () => {
+  const h = createHarness({ initialScrollTop: 0 });
+  h.start();
+  h.input("\t");
+  h.input("v");
+  h.input("v");
+  h.input("l");
+
+  assert.equal(h.selectionText(), "hi");
+  assert.match(h.statuses.get("pi-tab-focus") ?? "", /^VISUAL SELECT/);
+
+  assert.deepEqual(h.input(":"), { consume: true });
+  assert.equal(h.focusedComponent, h.editor);
+  assert.deepEqual(h.editorInputs, [":"]);
+  assert.equal(h.selectionText(), "hi");
+
+  assert.equal(h.input("\r"), undefined);
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(h.focusedComponent, null);
+  assert.equal(h.selectionText(), "hi");
+  assert.match(h.statuses.get("pi-tab-focus") ?? "", /^VISUAL SELECT/);
 });
 
 test("Tab during EX cancels back to transcript focus without autocomplete", () => {

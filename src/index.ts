@@ -279,11 +279,11 @@ class VisualCursorContentProxy implements Component {
       col >= lineWidth
         ? " "
         : sliceByColumn(
-            line,
-            col,
-            Math.max(1, visibleWidth(sliceByColumn(line, col, 1, true))),
-            true,
-          );
+          line,
+          col,
+          Math.max(1, visibleWidth(sliceByColumn(line, col, 1, true))),
+          true,
+        );
     const after = sliceByColumn(
       line,
       col + visibleWidth(atCursor),
@@ -355,10 +355,10 @@ class TranscriptGutterComponent implements Component {
   setSelection(item: TranscriptItem | undefined): void {
     this.selected = item
       ? {
-          startRow: item.gutterStartRow,
-          endRow: item.gutterEndRow,
-          kind: item.kind,
-        }
+        startRow: item.gutterStartRow,
+        endRow: item.gutterEndRow,
+        kind: item.kind,
+      }
       : undefined;
   }
 
@@ -381,7 +381,7 @@ class TranscriptGutterComponent implements Component {
     return lines;
   }
 
-  invalidate(): void {}
+  invalidate(): void { }
 }
 
 function findTranscriptContainer(
@@ -486,6 +486,15 @@ export default function transcriptFocus(
     const visualSnapshot = () => visualNavigation?.snapshot();
     const supportsExCommands = (): boolean =>
       typeof editor?.getMode === "function";
+
+    const transientUiHasFocus = (): boolean => {
+      const active = tui?.getFocusedComponent?.();
+      return active !== undefined && active !== null && active !== editor;
+    };
+
+    const reclaimTranscriptFocus = (): void => {
+      if (focused && tui?.getFocusedComponent?.() === editor) tui?.setFocus(null);
+    };
 
     const transcriptWidth = (): number => {
       if (!tui) return 1;
@@ -744,12 +753,12 @@ export default function transcriptFocus(
         const visibleEndRow = childStartRow + bounds.last + 1;
         const gutterStartRow =
           visibleStartRow > 0 &&
-          isBlankLine(transcriptLines[visibleStartRow - 1])
+            isBlankLine(transcriptLines[visibleStartRow - 1])
             ? visibleStartRow - 1
             : visibleStartRow;
         const gutterEndRow =
           visibleEndRow < transcriptLines.length &&
-          isBlankLine(transcriptLines[visibleEndRow])
+            isBlankLine(transcriptLines[visibleEndRow])
             ? visibleEndRow + 1
             : visibleEndRow;
 
@@ -998,7 +1007,13 @@ export default function transcriptFocus(
       setFocused(true);
       const items = refreshTranscriptItems();
       const selected = selectedItemFrom(items);
-      if (selected) showSelection(selected);
+      if (inVisualMode()) {
+        visualNavigation?.clamp(visualTextSource);
+        if (isVisualSelecting()) applyVisualSelection();
+        else transcriptLayout?.gutter.setSelection(undefined);
+      } else if (selected) {
+        showSelection(selected);
+      }
       tui?.requestRender();
     };
 
@@ -1126,8 +1141,8 @@ export default function transcriptFocus(
         next =
           direction < 0
             ? (items
-                .toReversed()
-                .find((item) => item.startRow < bounds.bottom) ?? items[0])
+              .toReversed()
+              .find((item) => item.startRow < bounds.bottom) ?? items[0])
             : (items.find((item) => item.endRow > bounds.top) ??
               items[items.length - 1]);
       }
@@ -1351,7 +1366,6 @@ export default function transcriptFocus(
         return;
       }
 
-      if (inVisualMode()) finishVisualMode();
       exDetour = true;
       exReturnArmed = false;
       setFocused(false);
@@ -1372,8 +1386,8 @@ export default function transcriptFocus(
       return data;
     };
 
-    const handleVisualInput = (data: string): void => {
-      if (!visualNavigation || !ensureVisualWidth()) return;
+    const handleVisualInput = (data: string): boolean => {
+      if (!visualNavigation || !ensureVisualWidth()) return false;
 
       const before = visualNavigation.snapshot().head;
       const result = visualNavigation.handleKey(
@@ -1382,7 +1396,7 @@ export default function transcriptFocus(
       );
       if (!result.handled) {
         updateStatus();
-        return;
+        return false;
       }
 
       if (result.command === "copy") copyVisualSelection();
@@ -1392,6 +1406,8 @@ export default function transcriptFocus(
       } else if (result.command === "ex") enterExDetour();
       else if (result.command === "exit") finishVisualMode();
       else syncVisualNavigation(before);
+
+      return true;
     };
 
     // Preserve any existing custom editor (including pi-vim). When Pi is using
@@ -1405,8 +1421,8 @@ export default function transcriptFocus(
       editor = (previousFactory
         ? previousFactory(nextTui, theme, keybindings)
         : new CustomEditor(nextTui, theme, keybindings, {
-            embedWorkingStatus: true,
-          })) as TranscriptEditor;
+          embedWorkingStatus: true,
+        })) as TranscriptEditor;
 
       // Install the gutter beside Pi's transcript ScrollView before initial
       // session messages are rendered. The transcript itself stays untouched;
@@ -1421,11 +1437,20 @@ export default function transcriptFocus(
     // Transcript focus is an input mode, not an editor implementation. Handle it
     // before input reaches the editor and consume only keys owned by transcript mode.
     const unsubscribeTerminalInput = ctx.ui.onTerminalInput((data) => {
-      // Raw input listeners see Kitty key-release events before component-level
-      // filtering. Never treat a release as a second transcript-mode command.
-      if (isKeyRelease(data)) {
-        return focused ? { consume: true } : undefined;
+      // When another Pi/custom component has actual TUI focus, it owns input.
+      // This covers select/confirm/input/editor prompts and capturing overlays.
+      if (transientUiHasFocus()) {
+        if (exDetour) checkExReturnAfterInput();
+        return undefined;
       }
+
+      // Pi restores editor focus when a transient component closes. Transcript
+      // mode is logically still active, so reclaim its normal null-focus state.
+      if (!exDetour) reclaimTranscriptFocus();
+
+
+      // Raw input listeners run before Pi filters key-release events.
+      if (isKeyRelease(data)) return undefined;
 
       // When pi-vim is present, `:` is a temporary detour into its EX mini-mode.
       // While it is active, let the editor/Pi own input normally. Enter or Escape
@@ -1436,9 +1461,7 @@ export default function transcriptFocus(
         // Tab keeps its transcript-focus meaning while the EX mini-mode itself
         // is active. Cancel the pending EX command and return to transcript
         // navigation instead of letting pi-vim treat Tab as completion.
-        // Once an EX command has opened a Pi overlay, however, leave Tab to that
-        // overlay so its own keyboard navigation remains intact.
-        if (matchesKey(data, Key.tab) && !tui?.hasOverlay()) {
+        if (matchesKey(data, Key.tab)) {
           if (!isKeyRepeat(data)) {
             editor?.handleInput("\x1b");
             finishExDetour();
@@ -1497,8 +1520,7 @@ export default function transcriptFocus(
       }
 
       if (inVisualMode()) {
-        handleVisualInput(data);
-        return { consume: true };
+        return handleVisualInput(data) ? { consume: true } : undefined;
       }
 
       if (matchesKey(data, Key.escape)) {
@@ -1598,9 +1620,10 @@ export default function transcriptFocus(
         return { consume: true };
       }
 
-      // While transcript mode owns focus, do not let unrecognised printable
-      // input accidentally edit the prompt underneath it.
-      return { consume: true };
+      // Transcript mode keeps TUI focus at null, so unrecognised input cannot
+      // edit the prompt editor. Leave it unconsumed so other extensions' raw
+      // terminal-input listeners can handle their own shortcuts.
+      return undefined;
     });
 
     cleanupSession = () => {
