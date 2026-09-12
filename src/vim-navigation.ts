@@ -729,7 +729,9 @@ export class VimVisualNavigation {
   }
 
   startSelection(kind: VimSelectionKind): void {
-    this.anchor = clonePoint(this.head);
+    if (!this.anchor || !this.selectionKind) {
+      this.anchor = clonePoint(this.head);
+    }
     this.selectionKind = kind;
     this.clearPending();
   }

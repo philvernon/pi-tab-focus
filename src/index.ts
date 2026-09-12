@@ -552,14 +552,14 @@ export default function transcriptFocus(
     };
 
     const graphemeEndPoint = (point: VimPoint): NativeSelectionPoint => {
-      const columns = graphemeColumns(sourceLine(point.row));
+      const cells = visualTextSource.line(point.row);
       const grapheme =
-        columns.find(
+        cells.find(
           (candidate) =>
             point.col >= candidate.start && point.col < candidate.end,
         ) ??
-        columns.find((candidate) => candidate.start >= point.col) ??
-        columns[columns.length - 1];
+        cells.find((candidate) => candidate.start >= point.col) ??
+        cells[cells.length - 1];
       return {
         row: point.row,
         col: grapheme?.end ?? point.col,
@@ -568,15 +568,18 @@ export default function transcriptFocus(
       };
     };
 
-    const lineSelectionRange = (point: VimPoint): NativeSelectionRange => ({
-      start: nativeSelectionPoint({ row: point.row, col: 0 }),
-      end: {
-        row: point.row,
-        col: visibleWidth(stripTerminalSequences(sourceLine(point.row))),
-        scrollView: activeScrollView(),
-        boundary: true,
-      },
-    });
+    const lineSelectionRange = (point: VimPoint): NativeSelectionRange => {
+      const cells = visualTextSource.line(point.row);
+      return {
+        start: nativeSelectionPoint({ row: point.row, col: 0 }),
+        end: {
+          row: point.row,
+          col: cells[cells.length - 1]?.end ?? 0,
+          scrollView: activeScrollView(),
+          boundary: true,
+        },
+      };
+    };
 
     const installTranscriptLayout = (): boolean => {
       if (!tui || tui.mode !== "fullscreen") return false;
@@ -1270,16 +1273,6 @@ export default function transcriptFocus(
       tui?.requestRender();
     };
 
-    const startVisualSelection = (kind: "character" | "line"): void => {
-      if (!visualNavigation) {
-        enterVisualMode();
-        if (!visualNavigation) return;
-      }
-      visualNavigation.startSelection(kind);
-      applyVisualSelection();
-      updateStatus();
-    };
-
     const syncVisualNavigation = (before: VimPoint): void => {
       const after = visualSnapshot()?.head;
       if (!after) return;
@@ -1515,7 +1508,8 @@ export default function transcriptFocus(
       }
 
       if (data === "V") {
-        startVisualSelection("line");
+        enterVisualMode();
+        if (inVisualMode()) handleVisualInput("V");
         return { consume: true };
       }
 

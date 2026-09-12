@@ -892,6 +892,22 @@ test("V starts line selection", async () => {
   assert.match(h.statuses.get("pi-tab-focus") ?? "", /^TRANSCRIPT/);
 });
 
+test("V widens an existing character selection to all selected lines", () => {
+  const h = createHarness({ initialScrollTop: 0 });
+  h.start();
+  h.input("\t");
+
+  h.input("v");
+  h.input("v");
+  h.input("j");
+  assert.equal(h.selectionText(), "hi, how can i help?\n");
+
+  h.input("V");
+  assert.match(h.statuses.get("pi-tab-focus") ?? "", /^VISUAL LINE/);
+  assert.equal(h.selectionGranularity, "line");
+  assert.equal(h.selectionText(), " hi, how can i help?\n");
+});
+
 test("v and Escape back out from selection to visual mode before transcript mode", () => {
   const h = createHarness({ initialScrollTop: 0 });
   h.start();

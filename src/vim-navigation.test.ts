@@ -141,6 +141,21 @@ test("quote and bracket text objects select inner or around delimiters", () => {
   assert.deepEqual(aroundParen.snapshot().head, { row: 0, col: 12 });
 });
 
+test("V converts an existing character selection to linewise without resetting its range", () => {
+  const text = source(["alpha", "beta", "gamma"]);
+  const navigation = new VimVisualNavigation({ row: 0, col: 1 });
+
+  press(navigation, text, "v", "j", "j", "l");
+  assert.deepEqual(navigation.snapshot().anchor, { row: 0, col: 1 });
+  assert.deepEqual(navigation.snapshot().head, { row: 2, col: 2 });
+  assert.equal(navigation.snapshot().selectionKind, "character");
+
+  press(navigation, text, "V");
+  assert.deepEqual(navigation.snapshot().anchor, { row: 0, col: 1 });
+  assert.deepEqual(navigation.snapshot().head, { row: 2, col: 2 });
+  assert.equal(navigation.snapshot().selectionKind, "line");
+});
+
 test("visual toggles and o remain state-machine concerns", () => {
   const text = source(["alpha beta"]);
   const navigation = new VimVisualNavigation({ row: 0, col: 0 });
