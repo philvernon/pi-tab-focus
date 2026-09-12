@@ -1,5 +1,6 @@
 import {
   CustomEditor,
+  VERSION,
   copyToClipboard,
   getAgentDir,
   type ExtensionAPI,
@@ -148,6 +149,8 @@ const GRAPHEME_SEGMENTER = new Intl.Segmenter(undefined, {
   granularity: "grapheme",
 });
 const LITERAL_URL_PATTERN = /(?:https?:\/\/|file:\/\/|mailto:)[^\s<>()]+/gu;
+const SUPPORTED_PI_VERSION = /^0\.85\.(?:[1-9]\d*)(?:\+.*)?$/u;
+const SUPPORTED_PI_VERSION_LABEL = "0.85.x (>=0.85.1)";
 const TRANSCRIPT_GUTTER_WIDTH = 1;
 const PROMPT_SELECTION_MARKER = "\x1b[38;2;255;121;198m┃\x1b[39m";
 const RESPONSE_SELECTION_MARKER = "\x1b[38;2;92;196;147m┃\x1b[39m";
@@ -462,6 +465,14 @@ export default function transcriptFocus(
   pi.on("session_start", (_event, ctx) => {
     cleanupSession?.();
     cleanupSession = undefined;
+
+    if (!SUPPORTED_PI_VERSION.test(VERSION)) {
+      ctx.ui.notify(
+        `pi-tab-focus supports Pi ${SUPPORTED_PI_VERSION_LABEL}; detected ${VERSION}. The extension has been disabled for this session.`,
+        "error",
+      );
+      return;
+    }
 
     const {
       focusKey,

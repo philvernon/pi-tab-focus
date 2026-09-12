@@ -1,103 +1,77 @@
 # pi-tab-focus
 
-Crush-style transcript focus mode for Pi. It works with Pi's built-in editor and optionally composes with `pi-vim`.
+Crush-style transcript focus mode for Pi. Navigate, select and copy transcript content without leaving the terminal.
 
-## Installation
+## Install
 
 ```sh
 pi install npm:pi-tab-focus
 ```
 
-If you also use `pi-vim`, install it before `pi-tab-focus` so transcript focus can delegate to the pi-vim editor factory and enable `:` EX commands:
+Run Pi in fullscreen mode:
+
+```sh
+pi --tui-mode fullscreen
+```
+
+### pi-vim
+
+`pi-tab-focus` works with Pi's built-in editor and supports `pi-vim`. If you use both, install `pi-vim` first:
 
 ```sh
 pi install npm:pi-vim
 pi install npm:pi-tab-focus
 ```
 
-Equivalent `settings.json` ordering when both packages are installed:
+The same ordering should be used in `settings.json`.
 
-```json
-{
-  "packages": [
-    "npm:pi-vim",
-    "npm:pi-tab-focus"
-  ]
-}
-```
+## Usage
 
-When no custom editor is installed, `pi-tab-focus` uses Pi's own `CustomEditor`. When another custom editor is already registered, including `pi-vim`, it delegates to that editor factory and returns the resulting editor unchanged. Other custom-editor extensions should therefore also be loaded before `pi-tab-focus`.
+Press `Tab` to enter transcript focus. Press `Tab` or `Esc` to return to the editor.
 
-Run Pi in fullscreen TUI mode:
+| Key | Action |
+| --- | --- |
+| `j` / `↓` | scroll down |
+| `k` / `↑` | scroll up |
+| `u` / `d` | half-page up / down |
+| `Shift+J` / `Shift+↓` | next transcript item |
+| `Shift+K` / `Shift+↑` | previous transcript item |
+| `b` / `PgUp` | page up |
+| `f` / `PgDn` | page down |
+| `g` / `Home` | top |
+| `G` / `End` | bottom |
+| `y` / `c` | copy selected item or visual selection |
+| `v` | visual cursor / character selection |
+| `V` | line selection |
+| `Enter` | open a link in the selected item |
+| `:` | open EX mode when using `pi-vim` |
+| `Ctrl+O` | toggle tool output |
+| `Ctrl+T` | toggle thinking visibility |
+| `Ctrl+C` | return to editor focus |
+| `Ctrl+D` | shut down Pi |
 
-```sh
-pi --tui-mode fullscreen
-```
-
-Use `/reload` after changing the package. The current development baseline is Pi 0.85.1; optional pi-vim integration is tested with pi-vim 0.14.2.
+Visual mode supports familiar Vim-style navigation including `h/j/k/l`, word motions, counts, `f/F/t/T`, `gg/G`, paragraph motions and common text objects such as `iw`, `aw` and quoted/bracketed selections.
 
 ## Configuration
 
-`Tab` is the default transcript-focus key. To change it globally, create `~/.pi/agent/pi-tab-focus.json`:
+`Tab` is the default focus key. To change it globally, create `~/.pi/agent/pi-tab-focus.json`:
 
 ```json
 {
-  "focusKey": "ctrl+m",
+  "focusKey": "f6",
   "hideDefaultScrollIndicator": true
 }
 ```
 
-A trusted project can override the global value with `.pi/pi-tab-focus.json`. The value uses Pi's normal key format, for example `tab`, `f1` or `ctrl+g`. Use `/reload` after changing the config. Because the focus key is handled before editor input, avoid unmodified printable keys unless you intentionally want them to replace normal typing.
+A trusted project can override this with `.pi/pi-tab-focus.json`. Use Pi's normal key format and run `/reload` after changing the config.
 
-`hideDefaultScrollIndicator` defaults to `true`, which suppresses Pi's clickable "Jump to latest message" label while scrolled up. Set it to `false` to keep Pi's built-in indicator.
+Set `hideDefaultScrollIndicator` to `false` if you want to keep Pi's built-in "Jump to latest message" indicator.
 
-## Keys
+## Compatibility
 
-| Key | Transcript mode |
-| --- | --- |
-| focus key (`Tab` by default) | enter/leave transcript focus |
-| `j`, `↓` | scroll down one line |
-| `k`, `↑` | scroll up one line |
-| `u` | scroll up half a page |
-| `d` | scroll down half a page |
-| `Shift+J`, `Shift+↓` | select next transcript item |
-| `Shift+K`, `Shift+↑` | select previous transcript item |
-| `b`, `PgUp` | page up |
-| `f`, `PgDn` | page down |
-| `g`, `Home` | top |
-| `G`, `End` | bottom |
-| `Ctrl+O` (or configured `app.tools.expand` binding) | toggle Pi tool-output expansion and refresh transcript geometry |
-| `Ctrl+T` (or configured `app.thinking.toggle` binding) | toggle Pi thinking visibility and refresh transcript geometry |
-| `Ctrl+D` | shut down Pi |
-| `Ctrl+C` | leave transcript focus so Pi handles subsequent input normally |
-| `v` | enter visual cursor mode; press `v` again to start character selection; press `v` while selecting to return to visual cursor mode |
-| `V` | enter visual mode and select the current rendered line |
-| `h/j/k/l`, arrows | move the visual cursor and extend an active selection |
-| `w/b/e/ge`, `W/B/E/gE` | Vim word/WORD motions in visual mode; counts such as `3w` are supported |
-| `0`, `^`, `$` | move to rendered-line start, first non-whitespace grapheme, or final grapheme |
-| `gg`, `G`, `{`, `}`, `%` | move to a line/document or paragraph boundary, match brackets, or use counted `%` for a document percentage |
-| `f/F/t/T`, `;`, `,` | find/till a character on the rendered line and repeat the last find |
-| `iw/aw`, `iW/aW` | select inner/around word or WORD from visual cursor mode |
-| `i/a` + quotes/brackets | select quoted or bracketed text objects, including `i"`, `a(`, `i[`, `a{` and `i<` |
-| `o` | swap the active end of a visual selection |
-| `y`, `c` | copy the selected transcript item, or the exact visual selection when one is active |
-| `Enter` | follow a link in the selected item; in visual mode, prefer the link under the visual cursor |
-| `:` | with pi-vim installed, temporarily enter EX mode, then return to transcript focus when the command/cancel path finishes; the configured focus key cancels EX and returns immediately |
-| `Esc` | visual selection → visual cursor → transcript mode → editor focus |
+Currently supports Pi `0.85.x` from `0.85.1` onward. On unsupported Pi versions, `pi-tab-focus` disables itself instead of loading against an unknown API version.
 
-Transcript mode is implemented through Pi's `ctx.ui.onTerminalInput()` hook. With Pi's built-in editor, the package installs Pi's exported `CustomEditor`; Pi then wires the normal app actions, escape handling, image paste, autocomplete and extension shortcuts onto it. If a custom editor such as pi-vim is already registered, the package delegates to that editor's factory and returns its editor unchanged. pi-vim-specific EX integration is enabled only when the editor exposes the required mode API.
-
-The active transcript-mode hint is shown with `ctx.ui.setStatus()`. The editor itself keeps Pi's normal border colour, including thinking-level and working-state colours; transcript mode only changes the horizontal border rule from solid `─` to dotted `·`. Returning to editor focus restores the normal solid rule.
-
-`Shift+J/K` walks the rendered transcript item-by-item: user prompts, assistant messages, tool executions, bash entries, skill invocations, summaries and custom transcript entries. The transcript reserves a one-column Crush-style gutter from startup, before transcript focus is entered, so toggling transcript focus never moves its text. The gutter holds the heavy `┃` marker directly beside the transcript and spans visible item content plus at most one adjacent blank transcript row above and below, giving each selection the same padded Crush-style treatment without swallowing unrelated layout space. Prompt markers are pink and response/tool markers are green. `y/c` copies the unhighlighted rendered item.
-
-Visual mode starts as cursor navigation on the currently selected item. Press `v` again to anchor a character selection at the cursor, or press `V` to start a whole-line selection. Vim-style motions are implemented by a Pi-independent navigation state machine in `src/vim-navigation.ts`, including counts, word/WORD motions, character finds, `gg/G`, paragraph motions and common text objects such as `iw`, `aw`, quoted strings and bracket pairs. It intentionally implements the read-only navigation/selection subset rather than insert mode, editing operators or registers. Motions extend the active selection and `y/c` copies it exactly. While selecting, either `v` or `Esc` returns to visual cursor mode; `Esc` from visual cursor mode returns to transcript mode.
-
-Entering transcript mode automatically selects the bottom-most visible item unless the previous selection is still visible. Line/page/top/bottom scrolling preserves the current selection while it remains on-screen; once it scrolls out of view, selection stays attached to the edge it exited through: the bottom-most visible item when scrolling up, or the top-most visible item when scrolling down.
-
-## Pi API compatibility note
-
-Pi 0.85.1 does not expose a public transcript-item/viewport API. Item discovery therefore uses Pi's mounted component tree. The permanent gutter composes around Pi's private fullscreen layout, scroll-indicator suppression replaces Pi's private `scrollToEndIndicator` callback, the transcript-mode border style wraps the editor's guarded border-render methods, smooth reveal scrolling uses private viewport state and visual selections use Pi's private fullscreen selection state. Those private accesses are guarded and restored during cleanup, and the package peer range is intentionally constrained to the Pi 0.85.x API line (`^0.85.1`) so incompatible private-layout changes are not silently accepted.
+Optional `pi-vim` integration is tested with `pi-vim` `0.14.2`.
 
 ## Development
 
@@ -106,5 +80,3 @@ npm ci
 npm run typecheck
 npm test
 ```
-
-The test suite covers standalone Pi and optional pi-vim integration, transcript focus entry/exit, viewport-following selection, visual character and line selection, Vim motions and text objects, link following, all supported transcript item kinds, gutter rendering, copy mappings, Pi layout-changing actions, completion-triggered geometry refresh, EX-mode detours and session cleanup.
