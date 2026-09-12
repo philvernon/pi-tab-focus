@@ -1,6 +1,7 @@
 import {
   CustomEditor,
   copyToClipboard,
+  getAgentDir,
   type ExtensionAPI,
 } from "@earendil-works/pi-coding-agent";
 import {
@@ -19,6 +20,7 @@ import {
   type EditorComponent,
   type TUI,
 } from "@earendil-works/pi-tui";
+import { resolveFocusKey } from "./focus-key-config.ts";
 import {
   VimVisualNavigation,
   compareVimPoints,
@@ -436,6 +438,7 @@ function findMountedTranscriptContainer(
 export default function transcriptFocus(
   pi: ExtensionAPI,
   writeClipboard: ClipboardWriter = copyToClipboard,
+  agentDir: string = getAgentDir(),
 ): void {
   let cleanupSession: (() => void) | undefined;
   let refreshActiveTranscript: (() => void) | undefined;
@@ -455,6 +458,12 @@ export default function transcriptFocus(
   pi.on("session_start", (_event, ctx) => {
     cleanupSession?.();
     cleanupSession = undefined;
+
+    const { key: focusKey, warnings: focusConfigWarnings } = resolveFocusKey(
+      ctx,
+      agentDir,
+    );
+    for (const warning of focusConfigWarnings) ctx.ui.notify(warning, "warning");
 
     const previousFactory = ctx.ui.getEditorComponent();
 
@@ -486,6 +495,7 @@ export default function transcriptFocus(
     const visualSnapshot = () => visualNavigation?.snapshot();
     const supportsExCommands = (): boolean =>
       typeof editor?.getMode === "function";
+    const matchesFocusKey = (data: string): boolean => matchesKey(data, focusKey);
 
     const transientUiHasFocus = (): boolean => {
       const active = tui?.getFocusedComponent?.();
@@ -960,7 +970,7 @@ export default function transcriptFocus(
             : visual.selectionKind
               ? `VISUAL SELECT hjkl/wbe/WBE • iw/aw + quotes/brackets • fFtT • y/c copy • esc/v cursor${pending}${selection}`
               : `VISUAL NAV hjkl/wbe/WBE • fFtT • gg/G • v select • V line • iw/aw objects • esc exit${pending}${selection}`
-          : `TRANSCRIPT ↑↓/jk scroll • u/d half-page • shift+↑↓/JK item • b/pgup up • f/pgdn down • c/y copy${selection} • v visual • V line • enter link${exHint} • tab/esc exit`,
+          : `TRANSCRIPT ↑↓/jk scroll • u/d half-page • shift+↑↓/JK item • b/pgup up • f/pgdn down • c/y copy${selection} • v visual • V line • enter link${exHint} • ${focusKey}/esc exit`,
       );
     };
 
@@ -1458,10 +1468,9 @@ export default function transcriptFocus(
       // keeps checking until Pi restores focus to the editor, then transcript
       // mode resumes.
       if (exDetour) {
-        // Tab keeps its transcript-focus meaning while the EX mini-mode itself
-        // is active. Cancel the pending EX command and return to transcript
-        // navigation instead of letting pi-vim treat Tab as completion.
-        if (matchesKey(data, Key.tab)) {
+        // The configured focus key keeps its transcript-focus meaning while the
+        // EX mini-mode is active. Cancel EX and return to transcript navigation.
+        if (matchesFocusKey(data)) {
           if (!isKeyRepeat(data)) {
             editor?.handleInput("\x1b");
             finishExDetour();
@@ -1480,8 +1489,8 @@ export default function transcriptFocus(
         return undefined;
       }
 
-      if (matchesKey(data, Key.tab)) {
-        // Holding Tab must not repeatedly flip focus on Kitty key-repeat events.
+      if (matchesFocusKey(data)) {
+        // Holding the focus key must not repeatedly flip focus on key-repeat events.
         if (!isKeyRepeat(data)) {
           if (inVisualMode()) finishVisualMode({ restoreGutter: false });
           if (focused) leaveTranscriptMode();

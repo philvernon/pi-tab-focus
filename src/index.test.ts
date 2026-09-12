@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import {
@@ -20,6 +23,7 @@ type HarnessOptions = {
   paddedPrompts?: boolean;
   extraKinds?: boolean;
   replyText?: string;
+  agentDir?: string;
 };
 
 class FakeContainer {
@@ -380,6 +384,10 @@ function createHarness(options: HarnessOptions = {}) {
   const previousFactory =
     options.withEditor === false ? undefined : () => editor;
   const ctx = {
+    cwd: "/__pi-tab-focus-tests__/project",
+    isProjectTrusted() {
+      return false;
+    },
     shutdown() {
       shutdownCalls++;
     },
@@ -413,6 +421,7 @@ function createHarness(options: HarnessOptions = {}) {
     async (text) => {
       copiedTexts.push(text);
     },
+    options.agentDir ?? "/__pi-tab-focus-tests__/agent",
   );
 
   const start = () => {
@@ -608,6 +617,35 @@ test("Tab selects the bottom visible item and re-entry preserves a visible selec
 
   assert.deepEqual(h.input("\x1b"), { consume: true });
   assert.equal(h.focusedComponent, h.editor);
+});
+
+test("global config can replace Tab as the transcript focus key", () => {
+  const agentDir = mkdtempSync(join(tmpdir(), "pi-tab-focus-agent-"));
+  try {
+    writeFileSync(
+      join(agentDir, "pi-tab-focus.json"),
+      JSON.stringify({ focusKey: "ctrl+g" }),
+    );
+
+    const h = createHarness({ agentDir });
+    h.start();
+
+    assert.equal(h.input("\t"), undefined);
+    assert.deepEqual(h.editorInputs, ["\t"]);
+    assert.equal(h.focusedComponent, h.editor);
+
+    assert.deepEqual(h.input("\x07"), { consume: true });
+    assert.equal(h.focusedComponent, null);
+    assert.match(h.statuses.get("pi-tab-focus") ?? "", /ctrl\+g\/esc exit/);
+
+    assert.deepEqual(h.input(":"), { consume: true });
+    assert.equal(h.focusedComponent, h.editor);
+    assert.deepEqual(h.input("\x07"), { consume: true });
+    assert.equal(h.focusedComponent, null);
+    assert.deepEqual(h.editorInputs, ["\t", ":", "\x1b"]);
+  } finally {
+    rmSync(agentDir, { recursive: true, force: true });
+  }
 });
 
 test("transcript navigation consumes keys and drives fullscreen scrolling", () => {

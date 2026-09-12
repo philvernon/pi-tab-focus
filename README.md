@@ -36,11 +36,23 @@ pi --tui-mode fullscreen
 
 Use `/reload` after changing the package. The current development baseline is Pi 0.85.1; optional pi-vim integration is tested with pi-vim 0.14.2.
 
+## Configuration
+
+`Tab` is the default transcript-focus key. To change it globally, create `~/.pi/agent/pi-tab-focus.json`:
+
+```json
+{
+  "focusKey": "ctrl+m"
+}
+```
+
+A trusted project can override the global value with `.pi/pi-tab-focus.json`. The value uses Pi's normal key format, for example `tab`, `f1`, `ctrl+g`, `alt+enter` or `ctrl+shift+t`. Use `/reload` after changing the config. Because the focus key is handled before editor input, avoid unmodified printable keys unless you intentionally want them to replace normal typing.
+
 ## Keys
 
 | Key | Transcript mode |
 | --- | --- |
-| `Tab` | enter/leave transcript focus |
+| focus key (`Tab` by default) | enter/leave transcript focus |
 | `j`, `↓` | scroll down one line |
 | `k`, `↑` | scroll up one line |
 | `u` | scroll up half a page |
@@ -67,14 +79,14 @@ Use `/reload` after changing the package. The current development baseline is Pi
 | `o` | swap the active end of a visual selection |
 | `y`, `c` | copy the selected transcript item, or the exact visual selection when one is active |
 | `Enter` | follow a link in the selected item; in visual mode, prefer the link under the visual cursor |
-| `:` | with pi-vim installed, temporarily enter EX mode, then return to transcript focus when the command/cancel path finishes; `Tab` cancels EX and returns immediately |
+| `:` | with pi-vim installed, temporarily enter EX mode, then return to transcript focus when the command/cancel path finishes; the configured focus key cancels EX and returns immediately |
 | `Esc` | visual selection → visual cursor → transcript mode → editor focus |
 
 Transcript mode is implemented through Pi's `ctx.ui.onTerminalInput()` hook. With Pi's built-in editor, the package installs Pi's exported `CustomEditor`; Pi then wires the normal app actions, escape handling, image paste, autocomplete and extension shortcuts onto it. If a custom editor such as pi-vim is already registered, the package delegates to that editor's factory and returns its editor unchanged. pi-vim-specific EX integration is enabled only when the editor exposes the required mode API.
 
 The active transcript-mode hint is shown with `ctx.ui.setStatus()` in Pi's footer rather than by modifying the editor.
 
-`Shift+J/K` walks the rendered transcript item-by-item: user prompts, assistant messages, tool executions, bash entries, skill invocations, summaries and custom transcript entries. The transcript reserves a one-column Crush-style gutter from startup, before transcript focus is entered, so pressing `Tab` never moves its text. The gutter holds the heavy `┃` marker directly beside the transcript and spans visible item content plus at most one adjacent blank transcript row above and below, giving each selection the same padded Crush-style treatment without swallowing unrelated layout space. Prompt markers are pink and response/tool markers are green. `y/c` copies the unhighlighted rendered item.
+`Shift+J/K` walks the rendered transcript item-by-item: user prompts, assistant messages, tool executions, bash entries, skill invocations, summaries and custom transcript entries. The transcript reserves a one-column Crush-style gutter from startup, before transcript focus is entered, so toggling transcript focus never moves its text. The gutter holds the heavy `┃` marker directly beside the transcript and spans visible item content plus at most one adjacent blank transcript row above and below, giving each selection the same padded Crush-style treatment without swallowing unrelated layout space. Prompt markers are pink and response/tool markers are green. `y/c` copies the unhighlighted rendered item.
 
 Visual mode starts as cursor navigation on the currently selected item. Press `v` again to anchor a character selection at the cursor, or press `V` to start a whole-line selection. Vim-style motions are implemented by a Pi-independent navigation state machine in `src/vim-navigation.ts`, including counts, word/WORD motions, character finds, `gg/G`, paragraph motions and common text objects such as `iw`, `aw`, quoted strings and bracket pairs. It intentionally implements the read-only navigation/selection subset rather than insert mode, editing operators or registers. Motions extend the active selection and `y/c` copies it exactly. While selecting, either `v` or `Esc` returns to visual cursor mode; `Esc` from visual cursor mode returns to transcript mode.
 
