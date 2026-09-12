@@ -10,12 +10,11 @@
   "main": "./src/index.ts",
   "files": [
     "src/*.ts",
-    "!src/*.test.ts",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
-    "test": "node --experimental-strip-types --test \"src/**/*.test.ts\"",
+    "test": "node --experimental-strip-types --test \"src/tests/**/*.test.ts\"",
     "typecheck": "tsc --noEmit",
     "prepack": "npm run typecheck && npm test"
   },

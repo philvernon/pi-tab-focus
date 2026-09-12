@@ -9,7 +9,7 @@ import {
   stripTerminalSequences,
   visibleWidth,
 } from "@earendil-works/pi-tui";
-import transcriptFocus from "./index.ts";
+import transcriptFocus from "../index.ts";
 
 type Handler = (...args: any[]) => any;
 

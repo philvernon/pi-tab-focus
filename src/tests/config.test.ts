@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
-import { resolveConfig } from "./config.ts";
+import { resolveConfig } from "../config.ts";
 
 function withTempRoot(run: (root: string) => void): void {
   const root = mkdtempSync(join(tmpdir(), "pi-tab-focus-config-"));

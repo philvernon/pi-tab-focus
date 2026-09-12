@@ -4,7 +4,7 @@ import test from "node:test";
 import {
   installTranscriptEditorBorderStyle,
   suppressDefaultScrollIndicator,
-} from "./fullscreen-ui.ts";
+} from "../fullscreen-ui.ts";
 
 test("transcript border style preserves existing border rendering and restores inherited methods", () => {
   let transcriptFocused = false;

@@ -5,7 +5,7 @@ import {
   VimVisualNavigation,
   type VimCell,
   type VimTextSource,
-} from "./vim-navigation.ts";
+} from "../vim-navigation.ts";
 
 function source(lines: string[]): VimTextSource {
   const rows = lines.map((line) => {
