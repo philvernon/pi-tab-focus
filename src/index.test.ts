@@ -848,6 +848,34 @@ test("v enters visual mode and a second v starts character selection", async () 
   assert.match(h.statuses.get("pi-tab-focus") ?? "", /^TRANSCRIPT/);
 });
 
+test("visual mode supports Vim word motion and viw text objects", async () => {
+  const h = createHarness({
+    initialScrollTop: 0,
+    replyText: "alpha beta gamma",
+  });
+  h.start();
+  h.input("\t");
+
+  h.input("v");
+  h.input("i");
+  assert.match(h.statuses.get("pi-tab-focus") ?? "", / • i(?: •|$)/);
+  h.input("w");
+  assert.equal(h.selectionText(), "alpha");
+  assert.match(h.statuses.get("pi-tab-focus") ?? "", /^VISUAL SELECT/);
+
+  h.input("\x1b");
+  h.input("w");
+  assert.match(h.statuses.get("pi-tab-focus") ?? "", /^VISUAL NAV/);
+  h.input("i");
+  h.input("w");
+  assert.equal(h.selectionText(), "beta");
+
+  h.input("y");
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(h.copiedTexts, ["beta"]);
+  assert.match(h.statuses.get("pi-tab-focus") ?? "", /^TRANSCRIPT/);
+});
+
 test("V starts line selection", async () => {
   const h = createHarness({ initialScrollTop: 0 });
   h.start();

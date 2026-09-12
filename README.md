@@ -54,7 +54,13 @@ Use `/reload` after changing the package. The current development baseline is Pi
 | `v` | enter visual cursor mode; press `v` again to start character selection; press `v` while selecting to return to visual cursor mode |
 | `V` | enter visual mode and select the current rendered line |
 | `h/j/k/l`, arrows | move the visual cursor and extend an active selection |
+| `w/b/e`, `W/B/E` | Vim word/WORD motions in visual mode; counts such as `3w` are supported |
 | `0`, `^`, `$` | move to rendered-line start, first non-whitespace grapheme, or final grapheme |
+| `gg`, `G`, `{`, `}`, `%` | move to a line/document or paragraph boundary, match brackets, or use counted `%` for a document percentage |
+| `f/F/t/T`, `;`, `,` | find/till a character on the rendered line and repeat the last find |
+| `iw/aw`, `iW/aW` | select inner/around word or WORD from visual cursor mode |
+| `i/a` + quotes/brackets | select quoted or bracketed text objects, including `i"`, `a(`, `i[`, `a{` and `i<` |
+| `o` | swap the active end of a visual selection |
 | `y`, `c` | copy the selected transcript item, or the exact visual selection when one is active |
 | `Enter` | follow a link in the selected item; in visual mode, prefer the link under the visual cursor |
 | `:` | temporarily enter pi-vim EX mode, then return to transcript focus when the command/cancel path finishes; `Tab` cancels EX and returns immediately |
@@ -66,7 +72,7 @@ The active transcript-mode hint is shown with `ctx.ui.setStatus()` in Pi's foote
 
 `Shift+J/K` walks the rendered transcript item-by-item: user prompts, assistant messages, tool executions, bash entries, skill invocations, summaries and custom transcript entries. The transcript reserves a one-column Crush-style gutter from startup, before transcript focus is entered, so pressing `Tab` never moves its text. The gutter holds the heavy `┃` marker directly beside the transcript and spans visible item content plus at most one adjacent blank transcript row above and below, giving each selection the same padded Crush-style treatment without swallowing unrelated layout space. Prompt markers are pink and response/tool markers are green. `y/c` copies the unhighlighted rendered item.
 
-Visual mode starts as cursor navigation on the currently selected item. Press `v` again to anchor a character selection at the cursor, or press `V` to start a whole-line selection. Cursor motions extend the active selection and `y/c` copies it exactly. While selecting, either `v` or `Esc` returns to visual cursor mode; `Esc` from visual cursor mode returns to transcript mode.
+Visual mode starts as cursor navigation on the currently selected item. Press `v` again to anchor a character selection at the cursor, or press `V` to start a whole-line selection. Vim-style motions are implemented by a Pi-independent navigation state machine in `src/vim-navigation.ts`, including counts, word/WORD motions, character finds, `gg/G`, paragraph motions and common text objects such as `iw`, `aw`, quoted strings and bracket pairs. It intentionally implements the read-only navigation/selection subset rather than insert mode, editing operators or registers. Motions extend the active selection and `y/c` copies it exactly. While selecting, either `v` or `Esc` returns to visual cursor mode; `Esc` from visual cursor mode returns to transcript mode.
 
 Entering transcript mode automatically selects the bottom-most visible item unless the previous selection is still visible. Line/page/top/bottom scrolling preserves the current selection while it remains on-screen; once it scrolls out of view, selection stays attached to the edge it exited through: the bottom-most visible item when scrolling up, or the top-most visible item when scrolling down.
 
@@ -81,4 +87,4 @@ npm ci
 npm test
 ```
 
-The test suite covers transcript focus entry/exit, viewport-following selection, visual character and line selection, link following, all supported transcript item kinds, gutter rendering, copy mappings, Pi layout-changing actions, completion-triggered geometry refresh, EX-mode detours and session cleanup.
+The test suite covers transcript focus entry/exit, viewport-following selection, visual character and line selection, Vim motions and text objects, link following, all supported transcript item kinds, gutter rendering, copy mappings, Pi layout-changing actions, completion-triggered geometry refresh, EX-mode detours and session cleanup.

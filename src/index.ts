@@ -18,6 +18,14 @@ import {
   type EditorComponent,
   type TUI,
 } from "@earendil-works/pi-tui";
+import {
+  VimVisualNavigation,
+  compareVimPoints,
+  firstNonWhitespaceColumn,
+  type VimCell,
+  type VimPoint,
+  type VimTextSource,
+} from "./vim-navigation.ts";
 
 type PiVimEditor = EditorComponent & {
   getMode?: () => string;
@@ -38,7 +46,7 @@ type PrivateScrollView = Component & {
   scrollTo?: (scrollTop: number, options?: { disableFollow?: boolean }) => void;
 };
 
-type NativeSelectionPoint = VisualPoint & {
+type NativeSelectionPoint = VimPoint & {
   scrollView?: PrivateScrollView;
   boundary?: boolean;
 };
@@ -126,17 +134,6 @@ type TranscriptLayoutInstallation = {
   installedRoot: Component;
   scrollView: PrivateScrollView;
   gutter: TranscriptGutterComponent;
-};
-
-type VisualPoint = {
-  row: number;
-  col: number;
-};
-
-type GraphemeColumn = {
-  start: number;
-  end: number;
-  text: string;
 };
 
 const LAYOUT_NODE = Symbol.for("@earendil-works/pi-tui/layout-node");
@@ -255,12 +252,12 @@ function privateLayoutNode(
 
 class VisualCursorContentProxy implements Component {
   private readonly component: Component;
-  private readonly getCursor: () => VisualPoint | undefined;
+  private readonly getCursor: () => VimPoint | undefined;
   private readonly isSelecting: () => boolean;
 
   constructor(
     component: Component,
-    getCursor: () => VisualPoint | undefined,
+    getCursor: () => VimPoint | undefined,
     isSelecting: () => boolean,
   ) {
     this.component = component;
@@ -304,12 +301,12 @@ class VisualCursorContentProxy implements Component {
 
 class ScrollLayoutProxy implements Component {
   private readonly scrollView: PrivateScrollView;
-  private readonly getCursor: () => VisualPoint | undefined;
+  private readonly getCursor: () => VimPoint | undefined;
   private readonly isSelecting: () => boolean;
 
   constructor(
     scrollView: PrivateScrollView,
-    getCursor: () => VisualPoint | undefined,
+    getCursor: () => VimPoint | undefined,
     isSelecting: () => boolean,
   ) {
     this.scrollView = scrollView;
@@ -476,22 +473,23 @@ export default function transcriptFocus(
     let transcriptItemsCache: TranscriptItem[] | undefined;
     let transcriptContentHeight: number | undefined;
     let transcriptLayout: TranscriptLayoutInstallation | undefined;
+    let visualSourceRevision = 0;
+    const visualLineCache = new Map<number, VimCell[]>();
     const componentKeys = new WeakMap<object, string>();
     let nextComponentKey = 1;
     let exDetour = false;
     let exReturnArmed = false;
     let exReturnCheck: ReturnType<typeof setTimeout> | undefined;
-    let visualAnchor: VisualPoint | undefined;
-    let visualHead: VisualPoint | undefined;
-    let visualSelectionKind: "character" | "line" | undefined;
-    let visualPreferredCol: number | undefined;
+    let visualNavigation: VimVisualNavigation | undefined;
     let visualWidth: number | undefined;
 
     const activeScrollView = (): PrivateScrollView | undefined =>
       transcriptLayout?.scrollView ?? tui?.currentLayout?.primaryScrollView;
 
-    const inVisualMode = (): boolean => Boolean(visualHead);
-    const isVisualSelecting = (): boolean => Boolean(visualSelectionKind);
+    const inVisualMode = (): boolean => Boolean(visualNavigation);
+    const isVisualSelecting = (): boolean =>
+      visualNavigation?.isSelecting() ?? false;
+    const visualSnapshot = () => visualNavigation?.snapshot();
 
     const transcriptWidth = (): number => {
       if (!tui) return 1;
@@ -504,7 +502,7 @@ export default function transcriptFocus(
       );
     };
 
-    const nativeSelectionPoint = (point: VisualPoint): NativeSelectionPoint => ({
+    const nativeSelectionPoint = (point: VimPoint): NativeSelectionPoint => ({
       ...point,
       scrollView: activeScrollView(),
     });
@@ -512,9 +510,9 @@ export default function transcriptFocus(
     const sourceLine = (row: number): string =>
       tui?.getSelectionSourceLine?.(nativeSelectionPoint({ row, col: 0 })) ?? "";
 
-    const graphemeColumns = (line: string): GraphemeColumn[] => {
+    const graphemeColumns = (line: string): VimCell[] => {
       const stripped = stripTerminalSequences(line);
-      const columns: GraphemeColumn[] = [];
+      const columns: VimCell[] = [];
       let col = 0;
 
       for (const segment of GRAPHEME_SEGMENTER.segment(stripped)) {
@@ -531,19 +529,29 @@ export default function transcriptFocus(
         ? Math.max(0, Math.min(transcriptContentHeight - 1, row))
         : Math.max(0, row);
 
-    const firstNonWhitespaceColumn = (row: number): number => {
-      for (const grapheme of graphemeColumns(sourceLine(row))) {
-        if (!/\s/u.test(grapheme.text)) return grapheme.start;
-      }
-      return 0;
+    const visualTextSource: VimTextSource = {
+      get lineCount() {
+        return Math.max(1, transcriptContentHeight ?? 1);
+      },
+      get revision() {
+        return visualSourceRevision;
+      },
+      line: (row) => {
+        const clamped = clampRow(row);
+        const cached = visualLineCache.get(clamped);
+        if (cached) return cached;
+        const cells = graphemeColumns(sourceLine(clamped));
+        visualLineCache.set(clamped, cells);
+        return cells;
+      },
     };
 
-    const lastGraphemeColumn = (row: number): number => {
-      const columns = graphemeColumns(sourceLine(row));
-      return columns[columns.length - 1]?.start ?? 0;
+    const invalidateVisualSource = (): void => {
+      visualSourceRevision++;
+      visualLineCache.clear();
     };
 
-    const graphemeEndPoint = (point: VisualPoint): NativeSelectionPoint => {
+    const graphemeEndPoint = (point: VimPoint): NativeSelectionPoint => {
       const columns = graphemeColumns(sourceLine(point.row));
       const grapheme =
         columns.find(
@@ -560,7 +568,7 @@ export default function transcriptFocus(
       };
     };
 
-    const lineSelectionRange = (point: VisualPoint): NativeSelectionRange => ({
+    const lineSelectionRange = (point: VimPoint): NativeSelectionRange => ({
       start: nativeSelectionPoint({ row: point.row, col: 0 }),
       end: {
         row: point.row,
@@ -569,9 +577,6 @@ export default function transcriptFocus(
         boundary: true,
       },
     });
-
-    const compareVisualPoints = (left: VisualPoint, right: VisualPoint): number =>
-      left.row === right.row ? left.col - right.col : left.row - right.row;
 
     const installTranscriptLayout = (): boolean => {
       if (!tui || tui.mode !== "fullscreen") return false;
@@ -618,7 +623,7 @@ export default function transcriptFocus(
           {
             component: new ScrollLayoutProxy(
               scrollView,
-              () => visualHead,
+              () => visualSnapshot()?.head,
               () => isVisualSelecting(),
             ),
             basis: 0,
@@ -678,6 +683,7 @@ export default function transcriptFocus(
     };
 
     const refreshTranscriptItems = (): TranscriptItem[] => {
+      invalidateVisualSource();
       if (!tui) {
         transcriptContentHeight = undefined;
         transcriptItemsCache = [];
@@ -818,30 +824,31 @@ export default function transcriptFocus(
     };
 
     const applyVisualSelection = (): void => {
-      if (!tui || !visualHead || !visualAnchor || !visualSelectionKind) {
+      const visual = visualSnapshot();
+      if (!tui || !visual?.anchor || !visual.selectionKind) {
         clearNativeTextSelection();
         return;
       }
 
-      if (visualSelectionKind === "line") {
-        const anchorRange = lineSelectionRange(visualAnchor);
-        const headRange = lineSelectionRange(visualHead);
-        const headBeforeAnchor = visualHead.row < visualAnchor.row;
+      const { anchor, head, selectionKind } = visual;
+      if (selectionKind === "line") {
+        const anchorRange = lineSelectionRange(anchor);
+        const headRange = lineSelectionRange(head);
+        const headBeforeAnchor = head.row < anchor.row;
         tui.selectionGranularity = "line";
         tui.selectionInitialRange = anchorRange;
         tui.selectionAnchor = headBeforeAnchor ? anchorRange.end : anchorRange.start;
         tui.selectionFocus = headBeforeAnchor ? headRange.start : headRange.end;
       } else {
-        const anchorBeforeHead =
-          compareVisualPoints(visualAnchor, visualHead) <= 0;
+        const anchorBeforeHead = compareVimPoints(anchor, head) <= 0;
         tui.selectionGranularity = "character";
         tui.selectionInitialRange = undefined;
         tui.selectionAnchor = anchorBeforeHead
-          ? nativeSelectionPoint(visualAnchor)
-          : nativeSelectionPoint(visualHead);
+          ? nativeSelectionPoint(anchor)
+          : nativeSelectionPoint(head);
         tui.selectionFocus = anchorBeforeHead
-          ? graphemeEndPoint(visualHead)
-          : graphemeEndPoint(visualAnchor);
+          ? graphemeEndPoint(head)
+          : graphemeEndPoint(anchor);
       }
 
       transcriptLayout?.gutter.setSelection(undefined);
@@ -849,9 +856,10 @@ export default function transcriptFocus(
     };
 
     const syncSelectionToVisualHead = (direction: -1 | 1): void => {
-      if (!visualHead) return;
+      const head = visualSnapshot()?.head;
+      if (!head) return;
       const items = transcriptItems();
-      const row = visualHead.row;
+      const row = head.row;
       const direct = items.find(
         (item) => row >= item.startRow && row < item.endRow,
       );
@@ -867,48 +875,35 @@ export default function transcriptFocus(
     };
 
     const revealVisualHead = (): void => {
-      if (!tui || !visualHead) return;
+      const head = visualSnapshot()?.head;
+      if (!tui || !head) return;
       const scrollView = activeScrollView();
       if (scrollView?.scrollTo && scrollView.viewportHeight > 0) {
         const top = scrollView.scrollTop;
         const bottom = top + scrollView.viewportHeight;
         let target: number | undefined;
-        if (visualHead.row < top) target = visualHead.row;
-        else if (visualHead.row >= bottom)
-          target = visualHead.row - scrollView.viewportHeight + 1;
+        if (head.row < top) target = head.row;
+        else if (head.row >= bottom)
+          target = head.row - scrollView.viewportHeight + 1;
         if (target !== undefined)
           scrollView.scrollTo(Math.max(0, target), { disableFollow: true });
       } else {
         const top = tui.viewportTop ?? 0;
-        if (
-          visualHead.row < top ||
-          visualHead.row >= top + effectiveViewportHeight()
-        ) {
-          tui.scrollBy?.(visualHead.row - top);
+        if (head.row < top || head.row >= top + effectiveViewportHeight()) {
+          tui.scrollBy?.(head.row - top);
         }
       }
-    };
-
-    const cancelVisualSelection = (): void => {
-      visualAnchor = undefined;
-      visualSelectionKind = undefined;
-      clearNativeTextSelection();
-      updateStatus();
-      tui?.requestRender();
     };
 
     const finishVisualMode = (
       options: { restoreGutter: boolean } = { restoreGutter: true },
     ): void => {
-      const head = visualHead;
-      visualAnchor = undefined;
-      visualHead = undefined;
-      visualSelectionKind = undefined;
-      visualPreferredCol = undefined;
+      const head = visualSnapshot()?.head;
+      if (options.restoreGutter && head) syncSelectionToVisualHead(1);
+      visualNavigation = undefined;
       visualWidth = undefined;
       clearNativeTextSelection();
       if (options.restoreGutter) {
-        if (head) syncSelectionToVisualHead(1);
         const selected = selectedItemFrom(transcriptItems());
         if (selected && focused) showSelection(selected);
       } else {
@@ -924,10 +919,7 @@ export default function transcriptFocus(
 
       const items = refreshTranscriptItems();
       const selected = selectedItemFrom(items);
-      if (visualHead)
-        visualHead = { ...visualHead, row: clampRow(visualHead.row) };
-      if (visualAnchor)
-        visualAnchor = { ...visualAnchor, row: clampRow(visualAnchor.row) };
+      visualNavigation?.clamp(visualTextSource);
       if (isVisualSelecting()) applyVisualSelection();
       else if (!inVisualMode() && selected) showSelection(selected);
       tui?.requestRender();
@@ -948,15 +940,17 @@ export default function transcriptFocus(
         selected && selectedIndex >= 0
           ? ` • ${selected.kind} ${selectedIndex + 1}/${items.length}`
           : "";
+      const visual = visualSnapshot();
+      const pending = visual?.pending ? ` • ${visual.pending}` : "";
 
       ctx.ui.setStatus(
         "pi-tab-focus",
-        inVisualMode()
-          ? visualSelectionKind === "line"
-            ? `VISUAL LINE h/j/k/l/arrows move • y/c copy • enter link • esc/v cursor${selection}`
-            : isVisualSelecting()
-              ? `VISUAL SELECT h/j/k/l/arrows move • 0/^/$ line • y/c copy • enter link • esc/v cursor${selection}`
-              : `VISUAL NAV h/j/k/l/arrows move • 0/^/$ line • v select • V line • enter link • esc exit${selection}`
+        visual
+          ? visual.selectionKind === "line"
+            ? `VISUAL LINE hjkl/wbe/WBE • fFtT • gg/G • y/c copy • esc/v cursor${pending}${selection}`
+            : visual.selectionKind
+              ? `VISUAL SELECT hjkl/wbe/WBE • iw/aw + quotes/brackets • fFtT • y/c copy • esc/v cursor${pending}${selection}`
+              : `VISUAL NAV hjkl/wbe/WBE • fFtT • gg/G • v select • V line • iw/aw objects • esc exit${pending}${selection}`
           : `TRANSCRIPT ↑↓/jk scroll • u/d half-page • shift+↑↓/JK item • b/pgup up • f/pgdn down • c/y copy${selection} • v visual • V line • enter link • : command • tab/esc exit`,
       );
     };
@@ -1248,7 +1242,7 @@ export default function transcriptFocus(
       return false;
     };
 
-    const selectedVisualStartPoint = (): VisualPoint | undefined => {
+    const selectedVisualStartPoint = (): VimPoint | undefined => {
       const items = refreshTranscriptItems();
       const selected = selectedItemFrom(items) ?? items[items.length - 1];
       if (!selected) {
@@ -1258,16 +1252,16 @@ export default function transcriptFocus(
       selectedKey = selected.key;
       selectedSemanticKey = selected.semanticKey;
       const row = clampRow(selected.startRow);
-      return { row, col: firstNonWhitespaceColumn(row) };
+      return {
+        row,
+        col: firstNonWhitespaceColumn(visualTextSource, row),
+      };
     };
 
     const enterVisualMode = (): void => {
       const point = selectedVisualStartPoint();
       if (!point) return;
-      visualAnchor = undefined;
-      visualHead = point;
-      visualSelectionKind = undefined;
-      visualPreferredCol = point.col;
+      visualNavigation = new VimVisualNavigation(point);
       visualWidth = transcriptWidth();
       hideSelectionDecoration();
       clearNativeTextSelection();
@@ -1277,79 +1271,27 @@ export default function transcriptFocus(
     };
 
     const startVisualSelection = (kind: "character" | "line"): void => {
-      if (!visualHead) {
+      if (!visualNavigation) {
         enterVisualMode();
-        if (!visualHead) return;
+        if (!visualNavigation) return;
       }
-      visualAnchor = { ...visualHead };
-      visualSelectionKind = kind;
+      visualNavigation.startSelection(kind);
       applyVisualSelection();
       updateStatus();
     };
 
-    const setVisualHead = (next: VisualPoint, direction: -1 | 1): void => {
-      if (!visualHead) return;
-      visualHead = { row: clampRow(next.row), col: Math.max(0, next.col) };
-      syncSelectionToVisualHead(direction);
-      revealVisualHead();
+    const syncVisualNavigation = (before: VimPoint): void => {
+      const after = visualSnapshot()?.head;
+      if (!after) return;
+      const comparison = compareVimPoints(after, before);
+      if (comparison !== 0) {
+        syncSelectionToVisualHead(comparison > 0 ? 1 : -1);
+        revealVisualHead();
+      }
       if (isVisualSelecting()) applyVisualSelection();
+      else clearNativeTextSelection();
       updateStatus();
       tui?.requestRender();
-    };
-
-    const moveVisualHorizontal = (direction: -1 | 1): void => {
-      if (!visualHead || !ensureVisualWidth()) return;
-      const columns = graphemeColumns(sourceLine(visualHead.row));
-      if (columns.length === 0) {
-        visualPreferredCol = 0;
-        setVisualHead({ ...visualHead, col: 0 }, direction);
-        return;
-      }
-      const currentCol = visualHead.col;
-      const exactIndex = columns.findIndex((column) => column.start === currentCol);
-      const fallbackIndex = columns.findLastIndex(
-        (column) => column.start < currentCol,
-      );
-      const index = exactIndex >= 0 ? exactIndex : Math.max(0, fallbackIndex);
-      const next =
-        columns[Math.max(0, Math.min(columns.length - 1, index + direction))];
-      visualPreferredCol = next?.start ?? 0;
-      setVisualHead({ ...visualHead, col: next?.start ?? 0 }, direction);
-    };
-
-    const nearestGraphemeColumn = (row: number, preferred: number): number => {
-      const columns = graphemeColumns(sourceLine(row));
-      if (columns.length === 0) return 0;
-      const containing = columns.find(
-        (column) => preferred >= column.start && preferred < column.end,
-      );
-      if (containing) return containing.start;
-      if (preferred >= (columns[columns.length - 1]?.end ?? 0))
-        return columns[columns.length - 1]?.start ?? 0;
-      return columns.find((column) => column.start >= preferred)?.start ?? 0;
-    };
-
-    const moveVisualVertical = (direction: -1 | 1): void => {
-      if (!visualHead || !ensureVisualWidth()) return;
-      const preferred = visualPreferredCol ?? visualHead.col;
-      const row = clampRow(visualHead.row + direction);
-      visualPreferredCol = preferred;
-      setVisualHead(
-        { row, col: nearestGraphemeColumn(row, preferred) },
-        direction,
-      );
-    };
-
-    const moveVisualLine = (
-      motion: "0" | "^" | "$",
-      direction: -1 | 1,
-    ): void => {
-      if (!visualHead || !ensureVisualWidth()) return;
-      let col = 0;
-      if (motion === "^") col = firstNonWhitespaceColumn(visualHead.row);
-      else if (motion === "$") col = lastGraphemeColumn(visualHead.row);
-      visualPreferredCol = col;
-      setVisualHead({ ...visualHead, col }, direction);
     };
 
     const copyVisualSelection = (): void => {
@@ -1391,11 +1333,12 @@ export default function transcriptFocus(
 
     const openSelectedLink = (): void => {
       let url: string | undefined;
-      if (inVisualMode() && visualHead) {
-        const line = sourceLine(visualHead.row);
+      const head = visualSnapshot()?.head;
+      if (head) {
+        const line = sourceLine(head.row);
         url =
-          getOsc8LinkAtColumn(line, visualHead.col) ??
-          literalUrlAtColumn(line, visualHead.col);
+          getOsc8LinkAtColumn(line, head.col) ??
+          literalUrlAtColumn(line, head.col);
       }
       if (!url) {
         const selected = selectedItemFrom(transcriptItems());
@@ -1410,6 +1353,55 @@ export default function transcriptFocus(
       } catch {
         ctx.ui.notify(`Failed to open link: ${url}`, "error");
       }
+    };
+
+    const enterExDetour = (): void => {
+      if (!editor) {
+        ctx.ui.notify("pi-vim editor is not available.", "warning");
+        return;
+      }
+
+      if (inVisualMode()) finishVisualMode();
+      exDetour = true;
+      exReturnArmed = false;
+      setFocused(false);
+
+      if (editor.getMode?.() !== "normal") editor.handleInput("\x1b");
+      editor.handleInput(":");
+    };
+
+    const normalizeVisualKey = (data: string): string => {
+      if (matchesKey(data, Key.escape) || matchesKey(data, "ctrl+["))
+        return "escape";
+      if (matchesKey(data, Key.enter)) return "enter";
+      if (matchesKey(data, Key.left)) return "h";
+      if (matchesKey(data, Key.right)) return "l";
+      if (matchesKey(data, Key.up)) return "k";
+      if (matchesKey(data, Key.down)) return "j";
+      if (data === ":" || matchesKey(data, Key.colon)) return ":";
+      return data;
+    };
+
+    const handleVisualInput = (data: string): void => {
+      if (!visualNavigation || !ensureVisualWidth()) return;
+
+      const before = visualNavigation.snapshot().head;
+      const result = visualNavigation.handleKey(
+        normalizeVisualKey(data),
+        visualTextSource,
+      );
+      if (!result.handled) {
+        updateStatus();
+        return;
+      }
+
+      if (result.command === "copy") copyVisualSelection();
+      else if (result.command === "open-link") {
+        openSelectedLink();
+        updateStatus();
+      } else if (result.command === "ex") enterExDetour();
+      else if (result.command === "exit") finishVisualMode();
+      else syncVisualNavigation(before);
     };
 
     // Preserve pi-vim's real ModalEditor/CustomEditor instance. Pi can therefore
@@ -1480,47 +1472,50 @@ export default function transcriptFocus(
 
       if (!focused) return undefined;
 
+      const transcriptLayoutAction = TRANSCRIPT_LAYOUT_ACTIONS.find((action) =>
+        appKeybindings?.matches?.(data, action),
+      );
+      if (transcriptLayoutAction) {
+        if (!isKeyRepeat(data)) {
+          if (inVisualMode()) finishVisualMode();
+          const handler = editor?.actionHandlers?.get(transcriptLayoutAction);
+          if (handler) handler();
+          else editor?.handleInput(data);
+          refreshSelectionGeometry();
+        }
+        return { consume: true };
+      }
+
+      if (matchesKey(data, "ctrl+d")) {
+        ctx.shutdown();
+        return { consume: true };
+      }
+
+      // Leave transcript focus on Ctrl+C; once the editor owns focus again,
+      // subsequent Ctrl+C input follows Pi's normal handling.
+      if (matchesKey(data, "ctrl+c")) {
+        if (inVisualMode()) finishVisualMode({ restoreGutter: false });
+        leaveTranscriptMode();
+        return { consume: true };
+      }
+
+      if (inVisualMode()) {
+        handleVisualInput(data);
+        return { consume: true };
+      }
+
       if (matchesKey(data, Key.escape)) {
-        if (isVisualSelecting()) cancelVisualSelection();
-        else if (inVisualMode()) finishVisualMode();
-        else leaveTranscriptMode();
+        leaveTranscriptMode();
         return { consume: true };
       }
 
       if (data === "v") {
-        if (!inVisualMode()) enterVisualMode();
-        else if (isVisualSelecting()) cancelVisualSelection();
-        else startVisualSelection("character");
+        enterVisualMode();
         return { consume: true };
       }
 
       if (data === "V") {
         startVisualSelection("line");
-        return { consume: true };
-      }
-
-      if (data === "h" || matchesKey(data, Key.left)) {
-        if (inVisualMode()) moveVisualHorizontal(-1);
-        return { consume: true };
-      }
-
-      if (data === "l" || matchesKey(data, Key.right)) {
-        if (inVisualMode()) moveVisualHorizontal(1);
-        return { consume: true };
-      }
-
-      if (data === "0" && inVisualMode()) {
-        moveVisualLine("0", -1);
-        return { consume: true };
-      }
-
-      if (data === "^" && inVisualMode()) {
-        moveVisualLine("^", -1);
-        return { consume: true };
-      }
-
-      if (data === "$" && inVisualMode()) {
-        moveVisualLine("$", 1);
         return { consume: true };
       }
 
@@ -1530,36 +1525,19 @@ export default function transcriptFocus(
       }
 
       if (data === ":" || matchesKey(data, Key.colon)) {
-        if (!editor) {
-          ctx.ui.notify("pi-vim editor is not available.", "warning");
-          return { consume: true };
-        }
-
-        if (inVisualMode()) finishVisualMode();
-        exDetour = true;
-        exReturnArmed = false;
-        setFocused(false);
-
-        if (editor.getMode?.() !== "normal") editor.handleInput("\x1b");
-        editor.handleInput(":");
+        enterExDetour();
         return { consume: true };
       }
 
       if (data === "j" || matchesKey(data, Key.down)) {
-        if (inVisualMode()) moveVisualVertical(1);
-        else {
-          tui?.scrollBy?.(1);
-          syncSelectionToViewport(1);
-        }
+        tui?.scrollBy?.(1);
+        syncSelectionToViewport(1);
         return { consume: true };
       }
 
       if (data === "k" || matchesKey(data, Key.up)) {
-        if (inVisualMode()) moveVisualVertical(-1);
-        else {
-          tui?.scrollBy?.(-1);
-          syncSelectionToViewport(-1);
-        }
+        tui?.scrollBy?.(-1);
+        syncSelectionToViewport(-1);
         return { consume: true };
       }
 
@@ -1572,20 +1550,6 @@ export default function transcriptFocus(
       if (data === "d") {
         halfPage(1);
         syncSelectionToViewport(1);
-        return { consume: true };
-      }
-
-      const transcriptLayoutAction = TRANSCRIPT_LAYOUT_ACTIONS.find((action) =>
-        appKeybindings?.matches?.(data, action),
-      );
-      if (transcriptLayoutAction) {
-        if (!isKeyRepeat(data)) {
-          if (inVisualMode()) finishVisualMode();
-          const handler = editor?.actionHandlers?.get(transcriptLayoutAction);
-          if (handler) handler();
-          else editor?.handleInput(data);
-          refreshSelectionGeometry();
-        }
         return { consume: true };
       }
 
@@ -1632,21 +1596,7 @@ export default function transcriptFocus(
       }
 
       if (data === "y" || data === "c") {
-        if (inVisualMode()) copyVisualSelection();
-        else copySelectedItem();
-        return { consume: true };
-      }
-
-      if (matchesKey(data, "ctrl+d")) {
-        ctx.shutdown();
-        return { consume: true };
-      }
-
-      // Leave transcript focus on Ctrl+C; once the editor owns focus again,
-      // subsequent Ctrl+C input follows Pi's normal handling.
-      if (matchesKey(data, "ctrl+c")) {
-        if (inVisualMode()) finishVisualMode({ restoreGutter: false });
-        leaveTranscriptMode();
+        copySelectedItem();
         return { consume: true };
       }
 
