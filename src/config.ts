@@ -4,42 +4,40 @@ import { join } from "node:path";
 import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
 import { Key, type KeyId } from "@earendil-works/pi-tui";
 
-type FocusKeyConfigContext = {
+type ConfigContext = {
   cwd: string;
   isProjectTrusted(): boolean;
 };
 
-type FocusKeyResolution = {
-  key: KeyId;
+type ResolvedConfig = {
+  focusKey: KeyId;
   hideDefaultScrollIndicator: boolean;
   warnings: string[];
 };
 
-type PartialFocusConfig = {
-  key?: KeyId;
+type PartialConfig = {
+  focusKey?: KeyId;
   hideDefaultScrollIndicator?: boolean;
   warnings: string[];
 };
 
-const FOCUS_CONFIG_FILE = "pi-tab-focus.json";
+const CONFIG_FILE = "pi-tab-focus.json";
 const DEFAULT_FOCUS_KEY: KeyId = Key.tab;
 const DEFAULT_HIDE_DEFAULT_SCROLL_INDICATOR = true;
 
-function readFocusKeyConfig(path: string): PartialFocusConfig {
+function readConfig(path: string): PartialConfig {
   if (!existsSync(path)) return { warnings: [] };
 
   try {
     const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown;
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
       return {
-        warnings: [
-          `Invalid ${FOCUS_CONFIG_FILE}: expected a JSON object (${path}).`,
-        ],
+        warnings: [`Invalid ${CONFIG_FILE}: expected a JSON object (${path}).`],
       };
     }
 
     const config = parsed as Record<string, unknown>;
-    const result: PartialFocusConfig = { warnings: [] };
+    const result: PartialConfig = { warnings: [] };
 
     const focusKey = config.focusKey;
     if (focusKey !== undefined) {
@@ -48,7 +46,7 @@ function readFocusKeyConfig(path: string): PartialFocusConfig {
           `Invalid focusKey in ${path}; using the previous/default binding.`,
         );
       } else {
-        result.key = focusKey as KeyId;
+        result.focusKey = focusKey as KeyId;
       }
     }
 
@@ -70,31 +68,29 @@ function readFocusKeyConfig(path: string): PartialFocusConfig {
   }
 }
 
-export function resolveFocusKey(
-  ctx: FocusKeyConfigContext,
+export function resolveConfig(
+  ctx: ConfigContext,
   agentDir: string,
-): FocusKeyResolution {
-  let key = DEFAULT_FOCUS_KEY;
+): ResolvedConfig {
+  let focusKey = DEFAULT_FOCUS_KEY;
   let hideDefaultScrollIndicator = DEFAULT_HIDE_DEFAULT_SCROLL_INDICATOR;
   const warnings: string[] = [];
 
-  const globalConfig = readFocusKeyConfig(join(agentDir, FOCUS_CONFIG_FILE));
-  if (globalConfig.key) key = globalConfig.key;
+  const globalConfig = readConfig(join(agentDir, CONFIG_FILE));
+  if (globalConfig.focusKey) focusKey = globalConfig.focusKey;
   if (globalConfig.hideDefaultScrollIndicator !== undefined) {
     hideDefaultScrollIndicator = globalConfig.hideDefaultScrollIndicator;
   }
   warnings.push(...globalConfig.warnings);
 
   if (ctx.isProjectTrusted()) {
-    const projectConfig = readFocusKeyConfig(
-      join(ctx.cwd, CONFIG_DIR_NAME, FOCUS_CONFIG_FILE),
-    );
-    if (projectConfig.key) key = projectConfig.key;
+    const projectConfig = readConfig(join(ctx.cwd, CONFIG_DIR_NAME, CONFIG_FILE));
+    if (projectConfig.focusKey) focusKey = projectConfig.focusKey;
     if (projectConfig.hideDefaultScrollIndicator !== undefined) {
       hideDefaultScrollIndicator = projectConfig.hideDefaultScrollIndicator;
     }
     warnings.push(...projectConfig.warnings);
   }
 
-  return { key, hideDefaultScrollIndicator, warnings };
+  return { focusKey, hideDefaultScrollIndicator, warnings };
 }

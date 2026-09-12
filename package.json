@@ -9,9 +9,7 @@
   "type": "module",
   "main": "./src/index.ts",
   "files": [
-    "src/index.ts",
-    "src/focus-key-config.ts",
-    "src/vim-navigation.ts",
+    "src/*.ts",
     "README.md",
     "LICENSE"
   ],

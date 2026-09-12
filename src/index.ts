@@ -20,7 +20,12 @@ import {
   type EditorComponent,
   type TUI,
 } from "@earendil-works/pi-tui";
-import { resolveFocusKey } from "./focus-key-config.ts";
+import { resolveConfig } from "./config.ts";
+import {
+  EDITOR_FOCUS_INDICATOR_WIDTH,
+  createEditorFocusIndicator,
+  suppressDefaultScrollIndicator,
+} from "./fullscreen-ui.ts";
 import {
   VimVisualNavigation,
   compareVimPoints,
@@ -40,7 +45,6 @@ type AppKeybindings = {
 };
 
 type ClipboardWriter = (text: string) => Promise<void>;
-type TextStyle = (text: string) => string;
 
 type PrivateScrollView = Component & {
   scrollTop: number;
@@ -69,7 +73,6 @@ type FullscreenTui = TUI & {
   getFocusedComponent?: () => Component | null;
   // These fields are private in TuiAltScreen's public type. Access is guarded and
   // limited to fullscreen transcript layout/viewport integration.
-  scrollToEndIndicator?: () => string;
   layoutRoot?: Component;
   currentLayout?: {
     root?: { component: Component };
@@ -147,7 +150,6 @@ const GRAPHEME_SEGMENTER = new Intl.Segmenter(undefined, {
 });
 const LITERAL_URL_PATTERN = /(?:https?:\/\/|file:\/\/|mailto:)[^\s<>()]+/gu;
 const TRANSCRIPT_GUTTER_WIDTH = 1;
-const EDITOR_FOCUS_INDICATOR_WIDTH = 1;
 const PROMPT_SELECTION_MARKER = "\x1b[38;2;255;121;198m┃\x1b[39m";
 const RESPONSE_SELECTION_MARKER = "\x1b[38;2;92;196;147m┃\x1b[39m";
 const TRANSCRIPT_LAYOUT_ACTIONS = [
@@ -389,31 +391,6 @@ class TranscriptGutterComponent implements Component {
   invalidate(): void { }
 }
 
-class EditorFocusIndicatorComponent implements Component {
-  private readonly isEditorFocused: () => boolean;
-  private readonly activeStyle: TextStyle;
-  private readonly inactiveStyle: TextStyle;
-
-  constructor(
-    isEditorFocused: () => boolean,
-    activeStyle: TextStyle,
-    inactiveStyle: TextStyle,
-  ) {
-    this.isEditorFocused = isEditorFocused;
-    this.activeStyle = activeStyle;
-    this.inactiveStyle = inactiveStyle;
-  }
-
-  render(_width: number): string[] {
-    const active = this.isEditorFocused();
-    const marker = active ? "●" : "·";
-    const style = active ? this.activeStyle : this.inactiveStyle;
-    return [style(marker), style(marker), style(marker)];
-  }
-
-  invalidate(): void { }
-}
-
 function findTranscriptContainer(
   component: Component,
   width: number,
@@ -488,11 +465,11 @@ export default function transcriptFocus(
     cleanupSession = undefined;
 
     const {
-      key: focusKey,
+      focusKey,
       hideDefaultScrollIndicator,
-      warnings: focusConfigWarnings,
-    } = resolveFocusKey(ctx, agentDir);
-    for (const warning of focusConfigWarnings) ctx.ui.notify(warning, "warning");
+      warnings: configWarnings,
+    } = resolveConfig(ctx, agentDir);
+    for (const warning of configWarnings) ctx.ui.notify(warning, "warning");
 
     const previousFactory = ctx.ui.getEditorComponent();
 
@@ -505,9 +482,7 @@ export default function transcriptFocus(
     let transcriptItemsCache: TranscriptItem[] | undefined;
     let transcriptContentHeight: number | undefined;
     let transcriptLayout: TranscriptLayoutInstallation | undefined;
-    let scrollIndicatorOverride:
-      | { tui: FullscreenTui; render: (() => string) | undefined }
-      | undefined;
+    let restoreScrollIndicator: (() => void) | undefined;
     let visualSourceRevision = 0;
     const visualLineCache = new Map<number, VimCell[]>();
     const componentKeys = new WeakMap<object, string>();
@@ -628,33 +603,9 @@ export default function transcriptFocus(
       };
     };
 
-    const hidePiScrollIndicator = (): void => {
-      if (
-        !tui ||
-        tui.mode !== "fullscreen" ||
-        !hideDefaultScrollIndicator ||
-        scrollIndicatorOverride
-      ) {
-        return;
-      }
-
-      scrollIndicatorOverride = {
-        tui,
-        render: tui.scrollToEndIndicator,
-      };
-      tui.scrollToEndIndicator = undefined;
-    };
-
-    const restorePiScrollIndicator = (): void => {
-      if (!scrollIndicatorOverride) return;
-      scrollIndicatorOverride.tui.scrollToEndIndicator =
-        scrollIndicatorOverride.render;
-      scrollIndicatorOverride = undefined;
-    };
-
     const installTranscriptLayout = (
-      activeIndicatorStyle: TextStyle,
-      inactiveIndicatorStyle: TextStyle,
+      activeIndicatorStyle: (text: string) => string,
+      inactiveIndicatorStyle: (text: string) => string,
     ): boolean => {
       if (!tui || tui.mode !== "fullscreen") return false;
       if (transcriptLayout) return true;
@@ -717,7 +668,7 @@ export default function transcriptFocus(
       const dockIndex = rootNode.entries.findIndex(
         (_entry, index) => index !== transcriptIndex,
       );
-      const editorFocusIndicator = new EditorFocusIndicatorComponent(
+      const editorFocusIndicator = createEditorFocusIndicator(
         () => tui?.getFocusedComponent?.() === editor,
         activeIndicatorStyle,
         inactiveIndicatorStyle,
@@ -1533,7 +1484,10 @@ export default function transcriptFocus(
       // session messages are rendered. The transcript/editor components stay
       // untouched; only Pi's fullscreen layout is composed around them.
       if (tui.mode === "fullscreen") {
-        hidePiScrollIndicator();
+        restoreScrollIndicator ??= suppressDefaultScrollIndicator(
+          tui,
+          hideDefaultScrollIndicator,
+        );
         if (
           installTranscriptLayout(
             theme.selectList.selectedPrefix,
@@ -1753,7 +1707,8 @@ export default function transcriptFocus(
       transcriptItemsCache = undefined;
       transcriptContentHeight = undefined;
       restoreTranscriptLayout();
-      restorePiScrollIndicator();
+      restoreScrollIndicator?.();
+      restoreScrollIndicator = undefined;
       if (focused && tui && editor) tui.setFocus(editor);
       ctx.ui.setEditorComponent(previousFactory);
       if (refreshActiveTranscript === refreshSelectionGeometry)
