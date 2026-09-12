@@ -54,6 +54,18 @@ test("word motions distinguish Vim words from WORDs and accept counts", () => {
   assert.deepEqual(big.snapshot().head, { row: 0, col: 0 });
 });
 
+test("ge and gE move to the previous word and WORD end", () => {
+  const text = source(["one,two three"]);
+
+  const small = new VimVisualNavigation({ row: 0, col: 4 });
+  press(small, text, "g", "e");
+  assert.deepEqual(small.snapshot().head, { row: 0, col: 3 });
+
+  const big = new VimVisualNavigation({ row: 0, col: 8 });
+  press(big, text, "g", "E");
+  assert.deepEqual(big.snapshot().head, { row: 0, col: 6 });
+});
+
 test("find motions remember their target for semicolon and comma", () => {
   const text = source(["a,b,c,d"]);
   const navigation = new VimVisualNavigation({ row: 0, col: 0 });
