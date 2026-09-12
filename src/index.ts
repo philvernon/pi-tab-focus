@@ -22,8 +22,8 @@ import {
 } from "@earendil-works/pi-tui";
 import { resolveConfig } from "./config.ts";
 import {
-  EDITOR_FOCUS_INDICATOR_WIDTH,
-  createEditorFocusIndicator,
+  FOCUS_INDICATOR_WIDTH,
+  createFocusIndicator,
   suppressDefaultScrollIndicator,
 } from "./fullscreen-ui.ts";
 import {
@@ -510,7 +510,9 @@ export default function transcriptFocus(
     };
 
     const reclaimTranscriptFocus = (): void => {
-      if (focused && tui?.getFocusedComponent?.() === editor) tui?.setFocus(null);
+      if (focused && tui?.getFocusedComponent?.() === editor) {
+        tui?.setFocus(null);
+      }
     };
 
     const transcriptWidth = (): number => {
@@ -662,45 +664,60 @@ export default function transcriptFocus(
         ],
         { align: "stretch" },
       );
-      // Pi's fullscreen root is transcript + fixed input dock. Keep this guarded
-      // to the first non-transcript sibling so a future layout shape degrades to
-      // transcript-only decoration rather than guessing at nested components.
+      // Decorate only Pi's footer slot. The footer component itself is opaque: this
+      // works the same whether Pi or any extension is rendering that slot.
       const dockIndex = rootNode.entries.findIndex(
         (_entry, index) => index !== transcriptIndex,
       );
-      const editorFocusIndicator = createEditorFocusIndicator(
-        () => tui?.getFocusedComponent?.() === editor,
-        activeIndicatorStyle,
-        inactiveIndicatorStyle,
-      );
-      const dockPane =
+      const dockNode =
         dockIndex >= 0
-          ? new HStack(
-            [
-              {
-                component: editorFocusIndicator,
-                basis: EDITOR_FOCUS_INDICATOR_WIDTH,
-                grow: 0,
-                shrink: 0,
-                minSize: EDITOR_FOCUS_INDICATOR_WIDTH,
-                maxSize: EDITOR_FOCUS_INDICATOR_WIDTH,
-              },
-              {
-                component: rootNode.entries[dockIndex].component,
-                basis: 0,
-                grow: 1,
-                shrink: 1,
-                minSize: 1,
-              },
-            ],
-            { align: "stretch" },
-          )
+          ? privateLayoutNode(rootNode.entries[dockIndex].component)
           : undefined;
+      let decoratedDock: Component | undefined;
+
+      if (dockNode?.type === "vstack" && dockNode.entries.length > 0) {
+        const footerIndex = dockNode.entries.length - 1;
+        const focusIndicator = createFocusIndicator(
+          () => tui?.getFocusedComponent?.() === editor,
+          activeIndicatorStyle,
+          inactiveIndicatorStyle,
+        );
+        const footerPane = new HStack(
+          [
+            {
+              component: focusIndicator,
+              basis: FOCUS_INDICATOR_WIDTH,
+              grow: 0,
+              shrink: 0,
+              minSize: FOCUS_INDICATOR_WIDTH,
+              maxSize: FOCUS_INDICATOR_WIDTH,
+            },
+            {
+              component: dockNode.entries[footerIndex].component,
+              basis: 0,
+              grow: 1,
+              shrink: 1,
+              minSize: 1,
+            },
+          ],
+          { align: "end" },
+        );
+        const dockEntries = dockNode.entries.map((entry, index) =>
+          index === footerIndex
+            ? { ...entry, component: footerPane }
+            : { ...entry },
+        );
+        decoratedDock = new VStack(dockEntries, {
+          gap: dockNode.gap,
+          align: dockNode.align,
+        });
+      }
+
       const rootEntries = rootNode.entries.map((entry, index) => {
         if (index === transcriptIndex)
           return { ...entry, component: transcriptPane };
-        if (index === dockIndex && dockPane)
-          return { ...entry, component: dockPane };
+        if (index === dockIndex && decoratedDock)
+          return { ...entry, component: decoratedDock };
         return { ...entry };
       });
       const installedRoot = new VStack(rootEntries, {
@@ -1480,9 +1497,8 @@ export default function transcriptFocus(
           embedWorkingStatus: true,
         })) as TranscriptEditor;
 
-      // Install the transcript gutter and editor-focus indicator before initial
-      // session messages are rendered. The transcript/editor components stay
-      // untouched; only Pi's fullscreen layout is composed around them.
+      // Install the transcript gutter and a one-cell focus marker beside the
+      // bottom line of Pi's footer slot. The footer component itself is untouched.
       if (tui.mode === "fullscreen") {
         restoreScrollIndicator ??= suppressDefaultScrollIndicator(
           tui,

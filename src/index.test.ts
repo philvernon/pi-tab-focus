@@ -296,7 +296,12 @@ function createHarness(options: HarnessOptions = {}) {
     maxScrollTop,
     (row) => scrollTo.push(row),
   );
-  const dock = new FakeContainer();
+  const dockEditor = new FakeText(["editor"]);
+  const footer = new FakeText(["footer"]);
+  const dock = new FakeVStack([
+    { component: dockEditor, shrink: 1, minSize: 3 },
+    { component: footer, shrink: 1, minSize: 1 },
+  ]);
   const originalLayoutRoot = new FakeVStack([
     { component: privateScrollView, basis: 0, grow: 1, shrink: 1, minSize: 1 },
     { component: dock, basis: "auto", grow: 0, shrink: 1, minSize: 1 },
@@ -538,14 +543,23 @@ function createHarness(options: HarnessOptions = {}) {
     return line.replace(/^┃/u, "│");
   };
 
-  const editorFocusIndicatorLines = (): string[] =>
-    layoutRoot?.children?.[1]?.children?.[0]?.render?.(1) ?? [];
+  const footerFocusIndicatorLines = (): string[] => {
+    const rootNode = layoutRoot?.[LAYOUT_NODE]?.();
+    const dockEntry = rootNode?.entries?.find((entry: any) => {
+      const node = entry.component?.[LAYOUT_NODE]?.();
+      return node?.type === "vstack";
+    });
+    const dockNode = dockEntry?.component?.[LAYOUT_NODE]?.();
+    const footerEntry = dockNode?.entries?.at(-1);
+    const footerNode = footerEntry?.component?.[LAYOUT_NODE]?.();
+    return footerNode?.entries?.[0]?.component?.render?.(1) ?? [];
+  };
 
   return {
     copiedTexts,
     editor,
-    editorFocusIndicatorLines,
     editorInputs,
+    footerFocusIndicatorLines,
     emit,
     input,
     notifications,
@@ -618,18 +632,18 @@ function createHarness(options: HarnessOptions = {}) {
   };
 }
 
-test("fullscreen chrome hides Pi's scroll indicator and marks editor focus", () => {
+test("fullscreen UI hides Pi's scroll indicator and marks focus on the footer's bottom line", () => {
   const h = createHarness();
   h.start();
 
   assert.equal(h.scrollToEndIndicator, undefined);
-  assert.deepEqual(h.editorFocusIndicatorLines(), ["●", "●", "●"]);
+  assert.deepEqual(h.footerFocusIndicatorLines(), ["●"]);
 
   h.input("\t");
-  assert.deepEqual(h.editorFocusIndicatorLines(), ["·", "·", "·"]);
+  assert.deepEqual(h.footerFocusIndicatorLines(), ["·"]);
 
   h.input("\t");
-  assert.deepEqual(h.editorFocusIndicatorLines(), ["●", "●", "●"]);
+  assert.deepEqual(h.footerFocusIndicatorLines(), ["●"]);
 
   h.shutdown();
   assert.equal(h.scrollToEndIndicator, h.defaultScrollToEndIndicator);

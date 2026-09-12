@@ -7,9 +7,9 @@ type ScrollIndicatorTui = {
   scrollToEndIndicator?: () => string;
 };
 
-export const EDITOR_FOCUS_INDICATOR_WIDTH = 1;
+export const FOCUS_INDICATOR_WIDTH = 2;
 
-class EditorFocusIndicatorComponent implements Component {
+class FocusIndicatorComponent implements Component {
   private readonly isEditorFocused: () => boolean;
   private readonly activeStyle: TextStyle;
   private readonly inactiveStyle: TextStyle;
@@ -25,21 +25,21 @@ class EditorFocusIndicatorComponent implements Component {
   }
 
   render(_width: number): string[] {
-    const active = this.isEditorFocused();
-    const marker = active ? "●" : "·";
-    const style = active ? this.activeStyle : this.inactiveStyle;
-    return [style(marker), style(marker), style(marker)];
+    const editorFocused = this.isEditorFocused();
+    const marker = editorFocused ? "●" : "·";
+    const style = editorFocused ? this.activeStyle : this.inactiveStyle;
+    return [style(marker)];
   }
 
-  invalidate(): void {}
+  invalidate(): void { }
 }
 
-export function createEditorFocusIndicator(
+export function createFocusIndicator(
   isEditorFocused: () => boolean,
   activeStyle: TextStyle,
   inactiveStyle: TextStyle,
 ): Component {
-  return new EditorFocusIndicatorComponent(
+  return new FocusIndicatorComponent(
     isEditorFocused,
     activeStyle,
     inactiveStyle,
