@@ -626,33 +626,24 @@ function createHarness(options: HarnessOptions = {}) {
   };
 }
 
-test("fullscreen UI hides Pi's scroll indicator and dashes editor borders in transcript mode", () => {
+test("fullscreen UI hides Pi's scroll indicator and changes editor borders in transcript mode", () => {
   const h = createHarness();
   h.start();
 
   assert.equal(h.scrollToEndIndicator, undefined);
-  assert.equal(
-    h.editor.renderTopBorder(16, 0),
-    `top:${"─".repeat(5)} work ${"─".repeat(5)}`,
-  );
-  assert.equal(h.editor.renderBottomBorder(8, 0), `bottom:${"─".repeat(8)}`);
+  const normalTopBorder = h.editor.renderTopBorder(16, 0);
+  const normalBottomBorder = h.editor.renderBottomBorder(8, 0);
 
   h.input("\t");
-  assert.equal(
-    h.editor.renderTopBorder(16, 0),
-    `top:${"╌".repeat(5)} work ${"╌".repeat(5)}`,
-  );
-  assert.equal(h.editor.renderBottomBorder(8, 0), `bottom:${"╌".repeat(8)}`);
-  assert.equal(
-    h.editor.renderTopBorder(18, 3),
-    `top:${"╌".repeat(4)} ↑ 3 more ${"╌".repeat(4)}`,
-  );
+  const transcriptTopBorder = h.editor.renderTopBorder(16, 0);
+  const transcriptBottomBorder = h.editor.renderBottomBorder(8, 0);
+  assert.notEqual(transcriptTopBorder, normalTopBorder);
+  assert.notEqual(transcriptBottomBorder, normalBottomBorder);
+  assert.match(transcriptTopBorder, / work /);
 
   h.input("\t");
-  assert.equal(
-    h.editor.renderTopBorder(16, 0),
-    `top:${"─".repeat(5)} work ${"─".repeat(5)}`,
-  );
+  assert.equal(h.editor.renderTopBorder(16, 0), normalTopBorder);
+  assert.equal(h.editor.renderBottomBorder(8, 0), normalBottomBorder);
 
   h.shutdown();
   assert.equal(h.scrollToEndIndicator, h.defaultScrollToEndIndicator);

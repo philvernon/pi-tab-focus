@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { installTranscriptEditorBorderStyle } from "./fullscreen-ui.ts";
+import {
+  installTranscriptEditorBorderStyle,
+  suppressDefaultScrollIndicator,
+} from "./fullscreen-ui.ts";
 
 test("transcript border style preserves existing border rendering and restores inherited methods", () => {
   let transcriptFocused = false;
@@ -39,13 +42,13 @@ test("transcript border style preserves existing border rendering and restores i
   transcriptFocused = true;
   assert.equal(
     editor.renderTopBorder(19, 0),
-    `accent(${"╌".repeat(5)} working ${"╌".repeat(5)})`,
+    `accent(${"·".repeat(5)} working ${"·".repeat(5)})`,
   );
   assert.equal(
     editor.renderTopBorder(20, 3),
-    `accent(${"╌".repeat(5)} ↑ 3 more ${"╌".repeat(5)})`,
+    `accent(${"·".repeat(5)} ↑ 3 more ${"·".repeat(5)})`,
   );
-  assert.equal(editor.renderBottomBorder(8), `muted(${"╌".repeat(8)})`);
+  assert.equal(editor.renderBottomBorder(8), `muted(${"·".repeat(8)})`);
 
   restore();
   assert.equal(Object.hasOwn(editor, "renderTopBorder"), false);
@@ -60,4 +63,22 @@ test("transcript border style preserves existing border rendering and restores i
 test("transcript border style is a no-op for editors without border renderers", () => {
   const restore = installTranscriptEditorBorderStyle({}, () => true);
   assert.equal(restore, undefined);
+});
+
+test("scroll indicator cleanup does not clobber a later replacement", () => {
+  const original = () => "Jump to latest message";
+  const replacement = () => "Other extension";
+  const tui = {
+    mode: "fullscreen",
+    scrollToEndIndicator: original as (() => string) | undefined,
+  };
+
+  const restore = suppressDefaultScrollIndicator(tui, true);
+  assert.ok(restore);
+  assert.equal(tui.scrollToEndIndicator, undefined);
+
+  tui.scrollToEndIndicator = replacement;
+  restore();
+
+  assert.equal(tui.scrollToEndIndicator, replacement);
 });

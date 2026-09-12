@@ -10,7 +10,7 @@ type BorderRenderableEditor = object & {
   renderBottomBorder?: BorderRenderer;
 };
 
-const DASHED_BORDER_GLYPH = "·";
+const TRANSCRIPT_BORDER_GLYPH = "·";
 const SOLID_BORDER_GLYPH = "─";
 
 function patchBorderRenderer(
@@ -33,7 +33,7 @@ function patchBorderRenderer(
   ) {
     const rendered = original.call(this, width, hiddenLineCount);
     return isTranscriptFocused()
-      ? rendered.replaceAll(SOLID_BORDER_GLYPH, DASHED_BORDER_GLYPH)
+      ? rendered.replaceAll(SOLID_BORDER_GLYPH, TRANSCRIPT_BORDER_GLYPH)
       : rendered;
   };
 
@@ -94,6 +94,8 @@ export function suppressDefaultScrollIndicator(
   tui.scrollToEndIndicator = undefined;
 
   return () => {
+    // Do not overwrite a later extension that installed its own indicator.
+    if (tui.scrollToEndIndicator !== undefined) return;
     tui.scrollToEndIndicator = previous;
   };
 }
