@@ -10,6 +10,7 @@
   "main": "./src/index.ts",
   "files": [
     "src/*.ts",
+    "!src/*.test.ts",
     "README.md",
     "LICENSE"
   ],
