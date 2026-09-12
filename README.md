@@ -8,7 +8,7 @@ Install `pi-vim` first, then this package so Pi preserves the required package o
 
 ```sh
 pi install npm:pi-vim
-pi install git:github.com/philvernon/pi-tab-focus
+pi install npm:pi-tab-focus
 ```
 
 Equivalent `settings.json` ordering:
@@ -17,7 +17,7 @@ Equivalent `settings.json` ordering:
 {
   "packages": [
     "npm:pi-vim",
-    "git:github.com/philvernon/pi-tab-focus"
+    "npm:pi-tab-focus"
   ]
 }
 ```
