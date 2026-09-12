@@ -204,12 +204,12 @@ function createHarness(options: HarnessOptions = {}) {
   const notifications: Array<{ message: string; type?: string }> = [];
   const editorInputs: string[] = [];
   const copiedTexts: string[] = [];
-  const focusHistory: unknown[] = [];
   const scrollBy: number[] = [];
   const scrollTo: number[] = [];
   const openedUrls: string[] = [];
   let scrollTopCalls = 0;
   let scrollBottomCalls = 0;
+  let shutdownCalls = 0;
   let terminalHandler:
     | ((data: string) => { consume?: boolean } | undefined)
     | undefined;
@@ -217,8 +217,6 @@ function createHarness(options: HarnessOptions = {}) {
   let focusedComponent: unknown = null;
   let overlay = false;
   let unsubscribed = false;
-  let invalidations = 0;
-  let renderRequests = 0;
   let toolExpandCalls = 0;
   let thinkingToggleCalls = 0;
 
@@ -243,12 +241,9 @@ function createHarness(options: HarnessOptions = {}) {
 
   const sliceByColumns = (line: string, start: number, end: number): string => {
     const stripped = stripTerminalSequences(line);
-    const segmenter = new Intl.Segmenter(undefined, {
-      granularity: "grapheme",
-    });
     let col = 0;
     let text = "";
-    for (const segment of segmenter.segment(stripped)) {
+    for (const segment of new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(stripped)) {
       const width = visibleWidth(segment.segment);
       const next = col + width;
       if (next > start && col < end) text += segment.segment;
@@ -328,14 +323,12 @@ function createHarness(options: HarnessOptions = {}) {
       currentLayout = component
         ? { root: { component }, primaryScrollView: privateScrollView }
         : undefined;
-      renderRequests++;
     },
     get viewportTop() {
       return privateScrollView.scrollTop;
     },
     setFocus(component: unknown) {
       focusedComponent = component;
-      focusHistory.push(component);
     },
     getFocusedComponent() {
       return focusedComponent;
@@ -358,12 +351,9 @@ function createHarness(options: HarnessOptions = {}) {
       scrollBottomCalls++;
       privateScrollView.scrollTop = maxScrollTop;
     },
-    invalidate() {
-      invalidations++;
-    },
     selectionAnchor: undefined as any,
     selectionFocus: undefined as any,
-    selectionGranularity: "character" as const,
+    selectionGranularity: "character" as "character" | "word" | "line",
     selectionInitialRange: undefined as any,
     clearTextSelection() {
       this.selectionAnchor = undefined;
@@ -375,10 +365,7 @@ function createHarness(options: HarnessOptions = {}) {
       return scrollContentLines()[point.row] ?? "";
     },
     async copyActiveSelectionToClipboard() {
-      const text = activeSelectionText(
-        this.selectionAnchor,
-        this.selectionFocus,
-      );
+      const text = activeSelectionText(this.selectionAnchor, this.selectionFocus);
       if (!text) return false;
       copiedTexts.push(text);
       return true;
@@ -386,14 +373,15 @@ function createHarness(options: HarnessOptions = {}) {
     openUrl(url: string) {
       openedUrls.push(url);
     },
-    requestRender() {
-      renderRequests++;
-    },
+    requestRender() {},
   };
 
   const previousFactory =
     options.withEditor === false ? undefined : () => editor;
   const ctx = {
+    shutdown() {
+      shutdownCalls++;
+    },
     ui: {
       getEditorComponent: () => previousFactory,
       setEditorComponent(factory: Handler) {
@@ -519,7 +507,6 @@ function createHarness(options: HarnessOptions = {}) {
     editor,
     editorInputs,
     emit,
-    focusHistory,
     input,
     notifications,
     openedUrls,
@@ -551,11 +538,8 @@ function createHarness(options: HarnessOptions = {}) {
     selectionText() {
       return activeSelectionText(tui.selectionAnchor, tui.selectionFocus);
     },
-    selectionAnchor() {
-      return tui.selectionAnchor;
-    },
-    selectionFocus() {
-      return tui.selectionFocus;
+    get selectionGranularity() {
+      return tui.selectionGranularity;
     },
     get layoutRoot() {
       return layoutRoot;
@@ -569,14 +553,11 @@ function createHarness(options: HarnessOptions = {}) {
     get scrollBottomCalls() {
       return scrollBottomCalls;
     },
+    get shutdownCalls() {
+      return shutdownCalls;
+    },
     get unsubscribed() {
       return unsubscribed;
-    },
-    get invalidations() {
-      return invalidations;
-    },
-    get renderRequests() {
-      return renderRequests;
     },
     get toolExpandCalls() {
       return toolExpandCalls;
@@ -627,6 +608,25 @@ test("transcript navigation consumes keys and drives fullscreen scrolling", () =
   assert.equal(h.scrollTopCalls, 1);
   assert.equal(h.scrollBottomCalls, 1);
   assert.deepEqual(h.editorInputs, []);
+});
+
+test("Ctrl+D shuts down and Ctrl+C returns control to Pi", () => {
+  const shutdown = createHarness();
+  shutdown.start();
+  shutdown.input("\t");
+  assert.deepEqual(shutdown.input("\x04"), { consume: true });
+  assert.equal(shutdown.shutdownCalls, 1);
+
+  const cancel = createHarness({ initialScrollTop: 0 });
+  cancel.start();
+  cancel.input("\t");
+  cancel.input("v");
+  assert.match(cancel.visualRenderedLine(3), new RegExp(CURSOR_MARKER));
+  assert.deepEqual(cancel.input("\x03"), { consume: true });
+  assert.equal(cancel.focusedComponent, cancel.editor);
+  assert.doesNotMatch(cancel.visualRenderedLine(3), new RegExp(CURSOR_MARKER));
+  assert.equal(cancel.input("\x03"), undefined);
+  assert.deepEqual(cancel.editorInputs, ["\x03"]);
 });
 
 test("layout-changing Pi actions work in transcript mode and refresh geometry", () => {
@@ -818,7 +818,7 @@ test("remaining selectable transcript kinds are classified and navigable", () =>
   assert.match(h.statuses.get("pi-tab-focus") ?? "", /bash 7\/10/);
 });
 
-test("visual mode starts in navigation without a text selection", () => {
+test("v enters visual mode and a second v starts character selection", async () => {
   const h = createHarness({ initialScrollTop: 0 });
   h.start();
   h.input("\t");
@@ -829,81 +829,65 @@ test("visual mode starts in navigation without a text selection", () => {
   assert.match(h.visualRenderedLine(3), new RegExp(CURSOR_MARKER));
   assert.doesNotMatch(h.renderedFirstVisibleLine(h.transcript.reply), /^│/);
 
-  h.input("y");
-  assert.deepEqual(h.copiedTexts, []);
-  assert.match(h.notifications.at(-1)?.message ?? "", /Press V/);
-  assert.match(h.statuses.get("pi-tab-focus") ?? "", /^VISUAL NAV/);
-});
-
-test("V starts selecting from the visual cursor", async () => {
-  const h = createHarness({ initialScrollTop: 0 });
-  h.start();
-  h.input("\t");
-  h.input("v");
-  h.input("l");
-
-  assert.equal(h.selectionText(), undefined);
-  h.input("V");
+  assert.deepEqual(h.input("v"), { consume: true });
   assert.match(h.statuses.get("pi-tab-focus") ?? "", /^VISUAL SELECT/);
-  assert.equal(h.selectionText(), "i");
-
-  h.input("y");
-  await new Promise<void>((resolve) => setTimeout(resolve, 0));
-  assert.deepEqual(h.copiedTexts, ["i"]);
-  assert.match(h.statuses.get("pi-tab-focus") ?? "", /^TRANSCRIPT/);
-  assert.match(h.renderedFirstVisibleLine(h.transcript.reply), /^│/);
-});
-
-test("visual h/l and j/k update native text selection", () => {
-  const h = createHarness({ initialScrollTop: 0, viewportHeight: 4 });
-  h.start();
-  h.input("\t");
-  h.input("v");
-  h.input("V");
+  assert.equal(h.selectionGranularity, "character");
+  assert.equal(h.selectionText(), "h");
+  assert.doesNotMatch(h.visualRenderedLine(3), new RegExp(CURSOR_MARKER));
+  assert.equal(
+    stripTerminalSequences(h.visualRenderedLine(3)),
+    " hi, how can i help?",
+  );
 
   h.input("l");
   assert.equal(h.selectionText(), "hi");
 
-  h.input("h");
-  assert.equal(h.selectionText(), "h");
-
-  h.input("j");
-  assert.equal(h.selectionText(), "hi, how can i help?\n");
-
-  h.input("j");
-  assert.equal(h.selectionText(), "hi, how can i help?\n\n u");
-  assert.match(h.statuses.get("pi-tab-focus") ?? "", /prompt 3\/6/);
+  h.input("y");
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(h.copiedTexts, ["hi"]);
+  assert.match(h.statuses.get("pi-tab-focus") ?? "", /^TRANSCRIPT/);
 });
 
-test("visual line motions select rendered-line columns", () => {
+test("V starts line selection", async () => {
+  const h = createHarness({ initialScrollTop: 0 });
+  h.start();
+  h.input("\t");
+
+  assert.deepEqual(h.input("V"), { consume: true });
+  assert.match(h.statuses.get("pi-tab-focus") ?? "", /^VISUAL LINE/);
+  assert.equal(h.selectionGranularity, "line");
+  assert.equal(h.selectionText(), " hi, how can i help?");
+
+  h.input("y");
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(h.copiedTexts, [" hi, how can i help?"]);
+  assert.match(h.statuses.get("pi-tab-focus") ?? "", /^TRANSCRIPT/);
+});
+
+test("v and Escape back out from selection to visual mode before transcript mode", () => {
   const h = createHarness({ initialScrollTop: 0 });
   h.start();
   h.input("\t");
   h.input("v");
-  h.input("V");
-
-  h.input("$");
-  assert.equal(h.selectionText(), "hi, how can i help?");
-
-  h.input("0");
-  assert.equal(h.selectionText(), " h");
-
-  h.input("^");
-  assert.equal(h.selectionText(), "h");
-});
-
-test("visual cleanup keys clear native selection", () => {
-  const h = createHarness({ initialScrollTop: 0 });
-  h.start();
-  h.input("\t");
   h.input("v");
-  h.input("V");
   assert.equal(h.selectionText(), "h");
 
+  h.input("v");
+  assert.equal(h.selectionText(), undefined);
+  assert.match(h.statuses.get("pi-tab-focus") ?? "", /^VISUAL NAV/);
+  assert.equal(h.focusedComponent, null);
+  assert.match(h.visualRenderedLine(3), new RegExp(CURSOR_MARKER));
+
+  h.input("v");
+  assert.equal(h.selectionText(), "h");
   h.input("\x1b");
   assert.equal(h.selectionText(), undefined);
+  assert.match(h.statuses.get("pi-tab-focus") ?? "", /^VISUAL NAV/);
+
+  h.input("\x1b");
   assert.match(h.statuses.get("pi-tab-focus") ?? "", /^TRANSCRIPT/);
   assert.equal(h.focusedComponent, null);
+  assert.match(h.renderedFirstVisibleLine(h.transcript.reply), /^│/);
 
   h.input("\x1b");
   assert.equal(h.focusedComponent, h.editor);
