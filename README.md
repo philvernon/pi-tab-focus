@@ -54,7 +54,7 @@ Use `/reload` after changing the package. The current development baseline is Pi
 | `v` | enter visual cursor mode; press `v` again to start character selection; press `v` while selecting to return to visual cursor mode |
 | `V` | enter visual mode and select the current rendered line |
 | `h/j/k/l`, arrows | move the visual cursor and extend an active selection |
-| `w/b/e`, `W/B/E` | Vim word/WORD motions in visual mode; counts such as `3w` are supported |
+| `w/b/e/ge`, `W/B/E/gE` | Vim word/WORD motions in visual mode; counts such as `3w` are supported |
 | `0`, `^`, `$` | move to rendered-line start, first non-whitespace grapheme, or final grapheme |
 | `gg`, `G`, `{`, `}`, `%` | move to a line/document or paragraph boundary, match brackets, or use counted `%` for a document percentage |
 | `f/F/t/T`, `;`, `,` | find/till a character on the rendered line and repeat the last find |
@@ -84,6 +84,7 @@ Pi 0.85.1 does not expose a public transcript-item/viewport API. Item discovery 
 
 ```sh
 npm ci
+npm run typecheck
 npm test
 ```
 
