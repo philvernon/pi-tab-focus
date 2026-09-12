@@ -214,6 +214,7 @@ function createHarness(options: HarnessOptions = {}) {
     | ((data: string) => { consume?: boolean } | undefined)
     | undefined;
   let editorFactory: Handler | undefined;
+  let installedEditor: any;
   let focusedComponent: unknown = null;
   let overlay = false;
   let unsubscribed = false;
@@ -420,9 +421,9 @@ function createHarness(options: HarnessOptions = {}) {
       ctx,
     );
     if (editorFactory) {
-      const installedEditor = editorFactory(
+      installedEditor = editorFactory(
         tui,
-        {},
+        { borderColor: (text: string) => text },
         {
           matches(data: string, action: string) {
             return (
@@ -432,14 +433,22 @@ function createHarness(options: HarnessOptions = {}) {
           },
         },
       );
+      if (
+        installedEditor !== editor &&
+        installedEditor?.actionHandlers instanceof Map
+      ) {
+        for (const [action, handler] of editor.actionHandlers) {
+          installedEditor.actionHandlers.set(action, handler);
+        }
+      }
       focusedComponent = installedEditor;
     }
   };
 
   const input = (data: string) => {
     const result = terminalHandler?.(data);
-    if (!result?.consume && focusedComponent === editor)
-      editor.handleInput(data);
+    if (!result?.consume && focusedComponent === installedEditor)
+      installedEditor?.handleInput(data);
     return result;
   };
 
@@ -546,6 +555,9 @@ function createHarness(options: HarnessOptions = {}) {
     },
     get focusedComponent() {
       return focusedComponent;
+    },
+    get installedEditor() {
+      return installedEditor;
     },
     get scrollTopCalls() {
       return scrollTopCalls;
@@ -1092,6 +1104,7 @@ test(": temporarily enters pi-vim EX and preserves the selected item on return",
   h.start();
   h.input("\t");
 
+  assert.match(h.statuses.get("pi-tab-focus") ?? "", /: command/);
   assert.match(h.renderedFirstVisibleLine(h.transcript.reply), /^│/);
   assert.deepEqual(h.input(":"), { consume: true });
   assert.equal(h.focusedComponent, h.editor);
@@ -1148,11 +1161,29 @@ test("session shutdown removes input handling, decoration and restores editor fo
   assert.doesNotMatch(h.renderedFirstVisibleLine(h.transcript.reply), /^│/);
 });
 
-test("missing pi-vim and non-fullscreen mode fail safely", () => {
-  const missing = createHarness({ withEditor: false });
-  missing.start();
-  assert.match(missing.notifications[0]?.message ?? "", /listed after pi-vim/);
+test("works without pi-vim using Pi's CustomEditor", () => {
+  const h = createHarness({ withEditor: false, initialScrollTop: 0 });
+  h.start();
 
+  assert.equal(h.notifications.length, 0);
+  assert.equal(h.focusedComponent, h.installedEditor);
+
+  assert.deepEqual(h.input("\t"), { consume: true });
+  assert.match(h.statuses.get("pi-tab-focus") ?? "", /^TRANSCRIPT/);
+  assert.doesNotMatch(h.statuses.get("pi-tab-focus") ?? "", /: command/);
+
+  assert.deepEqual(h.input("\x0f"), { consume: true });
+  assert.equal(h.toolExpandCalls, 1);
+
+  assert.deepEqual(h.input(":"), { consume: true });
+  assert.match(h.notifications.at(-1)?.message ?? "", /EX commands require pi-vim/);
+  assert.equal(h.focusedComponent, null);
+
+  h.input("\t");
+  assert.equal(h.focusedComponent, h.installedEditor);
+});
+
+test("non-fullscreen mode fails safely", () => {
   const inline = createHarness({ mode: "inline" });
   inline.start();
   assert.deepEqual(inline.input("\t"), { consume: true });

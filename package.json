@@ -4,7 +4,7 @@
     "pi-package"
   ],
   "version": "1.0.0",
-  "description": "Crush-style fullscreen transcript focus mode for Pi and pi-vim",
+  "description": "Crush-style fullscreen transcript focus mode for Pi",
   "license": "ISC",
   "type": "module",
   "main": "./src/index.ts",

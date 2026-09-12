@@ -1,4 +1,5 @@
 import {
+  CustomEditor,
   copyToClipboard,
   type ExtensionAPI,
 } from "@earendil-works/pi-coding-agent";
@@ -27,7 +28,7 @@ import {
   type VimTextSource,
 } from "./vim-navigation.ts";
 
-type PiVimEditor = EditorComponent & {
+type TranscriptEditor = EditorComponent & {
   getMode?: () => string;
   actionHandlers?: Map<string, () => void>;
 };
@@ -456,16 +457,9 @@ export default function transcriptFocus(
     cleanupSession = undefined;
 
     const previousFactory = ctx.ui.getEditorComponent();
-    if (!previousFactory) {
-      ctx.ui.notify(
-        "pi-tab-focus must be listed after pi-vim in settings.json packages.",
-        "warning",
-      );
-      return;
-    }
 
     let tui: FullscreenTui | undefined;
-    let editor: PiVimEditor | undefined;
+    let editor: TranscriptEditor | undefined;
     let appKeybindings: AppKeybindings | undefined;
     let focused = false;
     let selectedKey: string | undefined;
@@ -490,6 +484,8 @@ export default function transcriptFocus(
     const isVisualSelecting = (): boolean =>
       visualNavigation?.isSelecting() ?? false;
     const visualSnapshot = () => visualNavigation?.snapshot();
+    const supportsExCommands = (): boolean =>
+      typeof editor?.getMode === "function";
 
     const transcriptWidth = (): number => {
       if (!tui) return 1;
@@ -945,6 +941,7 @@ export default function transcriptFocus(
           : "";
       const visual = visualSnapshot();
       const pending = visual?.pending ? ` • ${visual.pending}` : "";
+      const exHint = supportsExCommands() ? " • : command" : "";
 
       ctx.ui.setStatus(
         "pi-tab-focus",
@@ -954,7 +951,7 @@ export default function transcriptFocus(
             : visual.selectionKind
               ? `VISUAL SELECT hjkl/wbe/WBE • iw/aw + quotes/brackets • fFtT • y/c copy • esc/v cursor${pending}${selection}`
               : `VISUAL NAV hjkl/wbe/WBE • fFtT • gg/G • v select • V line • iw/aw objects • esc exit${pending}${selection}`
-          : `TRANSCRIPT ↑↓/jk scroll • u/d half-page • shift+↑↓/JK item • b/pgup up • f/pgdn down • c/y copy${selection} • v visual • V line • enter link • : command • tab/esc exit`,
+          : `TRANSCRIPT ↑↓/jk scroll • u/d half-page • shift+↑↓/JK item • b/pgup up • f/pgdn down • c/y copy${selection} • v visual • V line • enter link${exHint} • tab/esc exit`,
       );
     };
 
@@ -972,8 +969,8 @@ export default function transcriptFocus(
       focused = next;
 
       // Transcript focus is real TUI focus, not just an input-routing flag.
-      // Removing focus from pi-vim suppresses its CURSOR_MARKER, so Pi hides the
-      // hardware caret while scrolling the transcript. This avoids cursor
+      // Removing focus from the editor suppresses its CURSOR_MARKER, so Pi hides
+      // the hardware caret while scrolling the transcript. This avoids cursor
       // show/hide/reposition flashes, which are particularly visible in tmux.
       if (tui) {
         tui.setFocus(focused ? null : (editor ?? null));
@@ -1349,8 +1346,8 @@ export default function transcriptFocus(
     };
 
     const enterExDetour = (): void => {
-      if (!editor) {
-        ctx.ui.notify("pi-vim editor is not available.", "warning");
+      if (!editor?.getMode) {
+        ctx.ui.notify("EX commands require pi-vim.", "info");
         return;
       }
 
@@ -1359,7 +1356,7 @@ export default function transcriptFocus(
       exReturnArmed = false;
       setFocused(false);
 
-      if (editor.getMode?.() !== "normal") editor.handleInput("\x1b");
+      if (editor.getMode() !== "normal") editor.handleInput("\x1b");
       editor.handleInput(":");
     };
 
@@ -1397,13 +1394,19 @@ export default function transcriptFocus(
       else syncVisualNavigation(before);
     };
 
-    // Preserve pi-vim's real ModalEditor/CustomEditor instance. Pi can therefore
-    // see and wire its actionHandlers, onEscape, onCtrlD, image-paste handler,
-    // extension shortcuts and any future CustomEditor surface directly.
+    // Preserve any existing custom editor (including pi-vim). When Pi is using
+    // its built-in editor, install an equivalent CustomEditor so this extension
+    // can receive the TUI/keybinding objects without requiring another package.
+    // Pi wires default editor callbacks, app actions, paste handling and extension
+    // shortcuts onto returned CustomEditor instances.
     ctx.ui.setEditorComponent((nextTui, theme, keybindings) => {
       tui = nextTui as FullscreenTui;
       appKeybindings = keybindings as AppKeybindings;
-      editor = previousFactory(nextTui, theme, keybindings) as PiVimEditor;
+      editor = (previousFactory
+        ? previousFactory(nextTui, theme, keybindings)
+        : new CustomEditor(nextTui, theme, keybindings, {
+            embedWorkingStatus: true,
+          })) as TranscriptEditor;
 
       // Install the gutter beside Pi's transcript ScrollView before initial
       // session messages are rendered. The transcript itself stays untouched;
@@ -1416,7 +1419,7 @@ export default function transcriptFocus(
     });
 
     // Transcript focus is an input mode, not an editor implementation. Handle it
-    // before input reaches pi-vim and consume only keys owned by transcript mode.
+    // before input reaches the editor and consume only keys owned by transcript mode.
     const unsubscribeTerminalInput = ctx.ui.onTerminalInput((data) => {
       // Raw input listeners see Kitty key-release events before component-level
       // filtering. Never treat a release as a second transcript-mode command.
@@ -1424,10 +1427,11 @@ export default function transcriptFocus(
         return focused ? { consume: true } : undefined;
       }
 
-      // `:` is a temporary detour into pi-vim's EX mini-mode. While it is
-      // active, let pi-vim/Pi own input normally. Enter or Escape ends EX input;
-      // if the command opens an overlay, subsequent overlay input keeps checking
-      // until Pi restores focus to the editor, then transcript mode resumes.
+      // When pi-vim is present, `:` is a temporary detour into its EX mini-mode.
+      // While it is active, let the editor/Pi own input normally. Enter or Escape
+      // ends EX input; if the command opens an overlay, subsequent overlay input
+      // keeps checking until Pi restores focus to the editor, then transcript
+      // mode resumes.
       if (exDetour) {
         // Tab keeps its transcript-focus meaning while the EX mini-mode itself
         // is active. Cancel the pending EX command and return to transcript
@@ -1614,13 +1618,12 @@ export default function transcriptFocus(
       transcriptItemsCache = undefined;
       transcriptContentHeight = undefined;
       restoreTranscriptLayout();
+      if (focused && tui && editor) tui.setFocus(editor);
       ctx.ui.setEditorComponent(previousFactory);
       if (refreshActiveTranscript === refreshSelectionGeometry)
         refreshActiveTranscript = undefined;
 
       ctx.ui.setStatus("pi-tab-focus", undefined);
-
-      if (focused && tui && editor) tui.setFocus(editor);
       focused = false;
     };
   });

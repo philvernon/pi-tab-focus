@@ -1,17 +1,21 @@
 # pi-tab-focus
 
-Crush-style transcript focus mode for Pi, designed to compose with `pi-vim` without replacing or wrapping its editor instance.
+Crush-style transcript focus mode for Pi. It works with Pi's built-in editor and optionally composes with `pi-vim`.
 
 ## Installation
 
-Install `pi-vim` first, then this package so Pi preserves the required package order:
+```sh
+pi install npm:pi-tab-focus
+```
+
+If you also use `pi-vim`, install it before `pi-tab-focus` so transcript focus can delegate to the pi-vim editor factory and enable `:` EX commands:
 
 ```sh
 pi install npm:pi-vim
 pi install npm:pi-tab-focus
 ```
 
-Equivalent `settings.json` ordering:
+Equivalent `settings.json` ordering when both packages are installed:
 
 ```json
 {
@@ -22,7 +26,7 @@ Equivalent `settings.json` ordering:
 }
 ```
 
-The order matters because `pi-tab-focus` uses `ctx.ui.getEditorComponent()` to capture the editor factory registered by `pi-vim`, then returns the resulting pi-vim editor instance unchanged.
+When no custom editor is installed, `pi-tab-focus` uses Pi's own `CustomEditor`. When another custom editor is already registered, including `pi-vim`, it delegates to that editor factory and returns the resulting editor unchanged. Other custom-editor extensions should therefore also be loaded before `pi-tab-focus`.
 
 Run Pi in fullscreen TUI mode:
 
@@ -30,7 +34,7 @@ Run Pi in fullscreen TUI mode:
 pi --tui-mode fullscreen
 ```
 
-Use `/reload` after changing the package. The current development baseline is Pi 0.85.1 and pi-vim 0.14.2.
+Use `/reload` after changing the package. The current development baseline is Pi 0.85.1; optional pi-vim integration is tested with pi-vim 0.14.2.
 
 ## Keys
 
@@ -63,12 +67,12 @@ Use `/reload` after changing the package. The current development baseline is Pi
 | `o` | swap the active end of a visual selection |
 | `y`, `c` | copy the selected transcript item, or the exact visual selection when one is active |
 | `Enter` | follow a link in the selected item; in visual mode, prefer the link under the visual cursor |
-| `:` | temporarily enter pi-vim EX mode, then return to transcript focus when the command/cancel path finishes; `Tab` cancels EX and returns immediately |
+| `:` | with pi-vim installed, temporarily enter EX mode, then return to transcript focus when the command/cancel path finishes; `Tab` cancels EX and returns immediately |
 | `Esc` | visual selection → visual cursor → transcript mode → editor focus |
 
-Transcript mode is implemented through Pi's `ctx.ui.onTerminalInput()` hook. The real pi-vim `ModalEditor` is returned unchanged, so Pi can continue to wire the full `CustomEditor` surface including app actions, escape handling, image paste and extension shortcuts.
+Transcript mode is implemented through Pi's `ctx.ui.onTerminalInput()` hook. With Pi's built-in editor, the package installs Pi's exported `CustomEditor`; Pi then wires the normal app actions, escape handling, image paste, autocomplete and extension shortcuts onto it. If a custom editor such as pi-vim is already registered, the package delegates to that editor's factory and returns its editor unchanged. pi-vim-specific EX integration is enabled only when the editor exposes the required mode API.
 
-The active transcript-mode hint is shown with `ctx.ui.setStatus()` in Pi's footer rather than by modifying pi-vim's rendered editor.
+The active transcript-mode hint is shown with `ctx.ui.setStatus()` in Pi's footer rather than by modifying the editor.
 
 `Shift+J/K` walks the rendered transcript item-by-item: user prompts, assistant messages, tool executions, bash entries, skill invocations, summaries and custom transcript entries. The transcript reserves a one-column Crush-style gutter from startup, before transcript focus is entered, so pressing `Tab` never moves its text. The gutter holds the heavy `┃` marker directly beside the transcript and spans visible item content plus at most one adjacent blank transcript row above and below, giving each selection the same padded Crush-style treatment without swallowing unrelated layout space. Prompt markers are pink and response/tool markers are green. `y/c` copies the unhighlighted rendered item.
 
@@ -88,4 +92,4 @@ npm run typecheck
 npm test
 ```
 
-The test suite covers transcript focus entry/exit, viewport-following selection, visual character and line selection, Vim motions and text objects, link following, all supported transcript item kinds, gutter rendering, copy mappings, Pi layout-changing actions, completion-triggered geometry refresh, EX-mode detours and session cleanup.
+The test suite covers standalone Pi and optional pi-vim integration, transcript focus entry/exit, viewport-following selection, visual character and line selection, Vim motions and text objects, link following, all supported transcript item kinds, gutter rendering, copy mappings, Pi layout-changing actions, completion-triggered geometry refresh, EX-mode detours and session cleanup.
