@@ -47,7 +47,7 @@ Use `/reload` after changing the package. The current development baseline is Pi
 }
 ```
 
-A trusted project can override the global value with `.pi/pi-tab-focus.json`. The value uses Pi's normal key format, for example `tab`, `f1`, `ctrl+g`, `alt+enter` or `ctrl+shift+t`. Use `/reload` after changing the config. Because the focus key is handled before editor input, avoid unmodified printable keys unless you intentionally want them to replace normal typing.
+A trusted project can override the global value with `.pi/pi-tab-focus.json`. The value uses Pi's normal key format, for example `tab`, `f1` or `ctrl+g`. Use `/reload` after changing the config. Because the focus key is handled before editor input, avoid unmodified printable keys unless you intentionally want them to replace normal typing.
 
 `hideDefaultScrollIndicator` defaults to `true`, which suppresses Pi's clickable "Jump to latest message" label while scrolled up. Set it to `false` to keep Pi's built-in indicator.
 
