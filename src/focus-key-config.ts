@@ -11,38 +11,62 @@ type FocusKeyConfigContext = {
 
 type FocusKeyResolution = {
   key: KeyId;
+  hideDefaultScrollIndicator: boolean;
+  warnings: string[];
+};
+
+type PartialFocusConfig = {
+  key?: KeyId;
+  hideDefaultScrollIndicator?: boolean;
   warnings: string[];
 };
 
 const FOCUS_CONFIG_FILE = "pi-tab-focus.json";
 const DEFAULT_FOCUS_KEY: KeyId = Key.tab;
+const DEFAULT_HIDE_DEFAULT_SCROLL_INDICATOR = true;
 
-function readFocusKeyConfig(path: string): {
-  key?: KeyId;
-  warning?: string;
-} {
-  if (!existsSync(path)) return {};
+function readFocusKeyConfig(path: string): PartialFocusConfig {
+  if (!existsSync(path)) return { warnings: [] };
 
   try {
     const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown;
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
       return {
-        warning: `Invalid ${FOCUS_CONFIG_FILE}: expected a JSON object (${path}).`,
+        warnings: [
+          `Invalid ${FOCUS_CONFIG_FILE}: expected a JSON object (${path}).`,
+        ],
       };
     }
 
-    const value = (parsed as Record<string, unknown>).focusKey;
-    if (value === undefined) return {};
-    if (typeof value !== "string" || value.length === 0) {
-      return {
-        warning: `Invalid focusKey in ${path}; using the previous/default binding.`,
-      };
+    const config = parsed as Record<string, unknown>;
+    const result: PartialFocusConfig = { warnings: [] };
+
+    const focusKey = config.focusKey;
+    if (focusKey !== undefined) {
+      if (typeof focusKey !== "string" || focusKey.length === 0) {
+        result.warnings.push(
+          `Invalid focusKey in ${path}; using the previous/default binding.`,
+        );
+      } else {
+        result.key = focusKey as KeyId;
+      }
     }
 
-    return { key: value as KeyId };
+    const hideDefaultScrollIndicator = config.hideDefaultScrollIndicator;
+    if (hideDefaultScrollIndicator !== undefined) {
+      if (typeof hideDefaultScrollIndicator !== "boolean") {
+        result.warnings.push(
+          `Invalid hideDefaultScrollIndicator in ${path}; using the previous/default value.`,
+        );
+      } else {
+        result.hideDefaultScrollIndicator = hideDefaultScrollIndicator;
+      }
+    }
+
+    return result;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    return { warning: `Could not read ${path}: ${message}` };
+    return { warnings: [`Could not read ${path}: ${message}`] };
   }
 }
 
@@ -51,19 +75,26 @@ export function resolveFocusKey(
   agentDir: string,
 ): FocusKeyResolution {
   let key = DEFAULT_FOCUS_KEY;
+  let hideDefaultScrollIndicator = DEFAULT_HIDE_DEFAULT_SCROLL_INDICATOR;
   const warnings: string[] = [];
 
   const globalConfig = readFocusKeyConfig(join(agentDir, FOCUS_CONFIG_FILE));
   if (globalConfig.key) key = globalConfig.key;
-  if (globalConfig.warning) warnings.push(globalConfig.warning);
+  if (globalConfig.hideDefaultScrollIndicator !== undefined) {
+    hideDefaultScrollIndicator = globalConfig.hideDefaultScrollIndicator;
+  }
+  warnings.push(...globalConfig.warnings);
 
   if (ctx.isProjectTrusted()) {
     const projectConfig = readFocusKeyConfig(
       join(ctx.cwd, CONFIG_DIR_NAME, FOCUS_CONFIG_FILE),
     );
     if (projectConfig.key) key = projectConfig.key;
-    if (projectConfig.warning) warnings.push(projectConfig.warning);
+    if (projectConfig.hideDefaultScrollIndicator !== undefined) {
+      hideDefaultScrollIndicator = projectConfig.hideDefaultScrollIndicator;
+    }
+    warnings.push(...projectConfig.warnings);
   }
 
-  return { key, warnings };
+  return { key, hideDefaultScrollIndicator, warnings };
 }

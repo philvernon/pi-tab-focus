@@ -23,30 +23,35 @@ function context(cwd: string, trusted: boolean) {
   };
 }
 
-test("defaults to Tab when no config exists", () => {
+test("uses defaults when no config exists", () => {
   withTempRoot((root) => {
     const agentDir = join(root, "agent");
     const cwd = join(root, "project");
 
     assert.deepEqual(resolveFocusKey(context(cwd, false), agentDir), {
       key: "tab",
+      hideDefaultScrollIndicator: true,
       warnings: [],
     });
   });
 });
 
-test("reads a global focus key", () => {
+test("reads global config", () => {
   withTempRoot((root) => {
     const agentDir = join(root, "agent");
     const cwd = join(root, "project");
     mkdirSync(agentDir, { recursive: true });
     writeFileSync(
       join(agentDir, "pi-tab-focus.json"),
-      JSON.stringify({ focusKey: "ctrl+g" }),
+      JSON.stringify({
+        focusKey: "ctrl+g",
+        hideDefaultScrollIndicator: false,
+      }),
     );
 
     assert.deepEqual(resolveFocusKey(context(cwd, false), agentDir), {
       key: "ctrl+g",
+      hideDefaultScrollIndicator: false,
       warnings: [],
     });
   });
@@ -60,25 +65,33 @@ test("trusted project config overrides global config", () => {
     mkdirSync(join(cwd, CONFIG_DIR_NAME), { recursive: true });
     writeFileSync(
       join(agentDir, "pi-tab-focus.json"),
-      JSON.stringify({ focusKey: "ctrl+g" }),
+      JSON.stringify({
+        focusKey: "ctrl+g",
+        hideDefaultScrollIndicator: false,
+      }),
     );
     writeFileSync(
       join(cwd, CONFIG_DIR_NAME, "pi-tab-focus.json"),
-      JSON.stringify({ focusKey: "ctrl+t" }),
+      JSON.stringify({
+        focusKey: "ctrl+t",
+        hideDefaultScrollIndicator: true,
+      }),
     );
 
     assert.deepEqual(resolveFocusKey(context(cwd, true), agentDir), {
       key: "ctrl+t",
+      hideDefaultScrollIndicator: true,
       warnings: [],
     });
     assert.deepEqual(resolveFocusKey(context(cwd, false), agentDir), {
       key: "ctrl+g",
+      hideDefaultScrollIndicator: false,
       warnings: [],
     });
   });
 });
 
-test("invalid config keeps the previous binding and returns a warning", () => {
+test("invalid config keeps previous values and returns warnings", () => {
   withTempRoot((root) => {
     const agentDir = join(root, "agent");
     const cwd = join(root, "project");
@@ -86,16 +99,27 @@ test("invalid config keeps the previous binding and returns a warning", () => {
     mkdirSync(join(cwd, CONFIG_DIR_NAME), { recursive: true });
     writeFileSync(
       join(agentDir, "pi-tab-focus.json"),
-      JSON.stringify({ focusKey: "ctrl+g" }),
+      JSON.stringify({
+        focusKey: "ctrl+g",
+        hideDefaultScrollIndicator: false,
+      }),
     );
     writeFileSync(
       join(cwd, CONFIG_DIR_NAME, "pi-tab-focus.json"),
-      JSON.stringify({ focusKey: 42 }),
+      JSON.stringify({
+        focusKey: 42,
+        hideDefaultScrollIndicator: "yes",
+      }),
     );
 
     const result = resolveFocusKey(context(cwd, true), agentDir);
     assert.equal(result.key, "ctrl+g");
-    assert.equal(result.warnings.length, 1);
+    assert.equal(result.hideDefaultScrollIndicator, false);
+    assert.equal(result.warnings.length, 2);
     assert.match(result.warnings[0] ?? "", /Invalid focusKey/);
+    assert.match(
+      result.warnings[1] ?? "",
+      /Invalid hideDefaultScrollIndicator/,
+    );
   });
 });

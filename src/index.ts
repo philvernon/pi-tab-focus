@@ -40,6 +40,7 @@ type AppKeybindings = {
 };
 
 type ClipboardWriter = (text: string) => Promise<void>;
+type TextStyle = (text: string) => string;
 
 type PrivateScrollView = Component & {
   scrollTop: number;
@@ -66,8 +67,9 @@ type FullscreenTui = TUI & {
   scrollToBottom?: () => void;
   setLayoutRoot?: (component: Component | undefined) => void;
   getFocusedComponent?: () => Component | null;
-  // Both fields are private in TuiAltScreen's public type. Access is guarded and
+  // These fields are private in TuiAltScreen's public type. Access is guarded and
   // limited to fullscreen transcript layout/viewport integration.
+  scrollToEndIndicator?: () => string;
   layoutRoot?: Component;
   currentLayout?: {
     root?: { component: Component };
@@ -145,6 +147,7 @@ const GRAPHEME_SEGMENTER = new Intl.Segmenter(undefined, {
 });
 const LITERAL_URL_PATTERN = /(?:https?:\/\/|file:\/\/|mailto:)[^\s<>()]+/gu;
 const TRANSCRIPT_GUTTER_WIDTH = 1;
+const EDITOR_FOCUS_INDICATOR_WIDTH = 1;
 const PROMPT_SELECTION_MARKER = "\x1b[38;2;255;121;198m┃\x1b[39m";
 const RESPONSE_SELECTION_MARKER = "\x1b[38;2;92;196;147m┃\x1b[39m";
 const TRANSCRIPT_LAYOUT_ACTIONS = [
@@ -386,6 +389,31 @@ class TranscriptGutterComponent implements Component {
   invalidate(): void { }
 }
 
+class EditorFocusIndicatorComponent implements Component {
+  private readonly isEditorFocused: () => boolean;
+  private readonly activeStyle: TextStyle;
+  private readonly inactiveStyle: TextStyle;
+
+  constructor(
+    isEditorFocused: () => boolean,
+    activeStyle: TextStyle,
+    inactiveStyle: TextStyle,
+  ) {
+    this.isEditorFocused = isEditorFocused;
+    this.activeStyle = activeStyle;
+    this.inactiveStyle = inactiveStyle;
+  }
+
+  render(_width: number): string[] {
+    const active = this.isEditorFocused();
+    const marker = active ? "●" : "·";
+    const style = active ? this.activeStyle : this.inactiveStyle;
+    return [style(marker), style(marker), style(marker)];
+  }
+
+  invalidate(): void { }
+}
+
 function findTranscriptContainer(
   component: Component,
   width: number,
@@ -459,10 +487,11 @@ export default function transcriptFocus(
     cleanupSession?.();
     cleanupSession = undefined;
 
-    const { key: focusKey, warnings: focusConfigWarnings } = resolveFocusKey(
-      ctx,
-      agentDir,
-    );
+    const {
+      key: focusKey,
+      hideDefaultScrollIndicator,
+      warnings: focusConfigWarnings,
+    } = resolveFocusKey(ctx, agentDir);
     for (const warning of focusConfigWarnings) ctx.ui.notify(warning, "warning");
 
     const previousFactory = ctx.ui.getEditorComponent();
@@ -476,6 +505,9 @@ export default function transcriptFocus(
     let transcriptItemsCache: TranscriptItem[] | undefined;
     let transcriptContentHeight: number | undefined;
     let transcriptLayout: TranscriptLayoutInstallation | undefined;
+    let scrollIndicatorOverride:
+      | { tui: FullscreenTui; render: (() => string) | undefined }
+      | undefined;
     let visualSourceRevision = 0;
     const visualLineCache = new Map<number, VimCell[]>();
     const componentKeys = new WeakMap<object, string>();
@@ -596,7 +628,34 @@ export default function transcriptFocus(
       };
     };
 
-    const installTranscriptLayout = (): boolean => {
+    const hidePiScrollIndicator = (): void => {
+      if (
+        !tui ||
+        tui.mode !== "fullscreen" ||
+        !hideDefaultScrollIndicator ||
+        scrollIndicatorOverride
+      ) {
+        return;
+      }
+
+      scrollIndicatorOverride = {
+        tui,
+        render: tui.scrollToEndIndicator,
+      };
+      tui.scrollToEndIndicator = undefined;
+    };
+
+    const restorePiScrollIndicator = (): void => {
+      if (!scrollIndicatorOverride) return;
+      scrollIndicatorOverride.tui.scrollToEndIndicator =
+        scrollIndicatorOverride.render;
+      scrollIndicatorOverride = undefined;
+    };
+
+    const installTranscriptLayout = (
+      activeIndicatorStyle: TextStyle,
+      inactiveIndicatorStyle: TextStyle,
+    ): boolean => {
       if (!tui || tui.mode !== "fullscreen") return false;
       if (transcriptLayout) return true;
       if (!tui.setLayoutRoot) return false;
@@ -652,11 +711,47 @@ export default function transcriptFocus(
         ],
         { align: "stretch" },
       );
-      const rootEntries = rootNode.entries.map((entry, index) =>
-        index === transcriptIndex
-          ? { ...entry, component: transcriptPane }
-          : { ...entry },
+      // Pi's fullscreen root is transcript + fixed input dock. Keep this guarded
+      // to the first non-transcript sibling so a future layout shape degrades to
+      // transcript-only decoration rather than guessing at nested components.
+      const dockIndex = rootNode.entries.findIndex(
+        (_entry, index) => index !== transcriptIndex,
       );
+      const editorFocusIndicator = new EditorFocusIndicatorComponent(
+        () => tui?.getFocusedComponent?.() === editor,
+        activeIndicatorStyle,
+        inactiveIndicatorStyle,
+      );
+      const dockPane =
+        dockIndex >= 0
+          ? new HStack(
+            [
+              {
+                component: editorFocusIndicator,
+                basis: EDITOR_FOCUS_INDICATOR_WIDTH,
+                grow: 0,
+                shrink: 0,
+                minSize: EDITOR_FOCUS_INDICATOR_WIDTH,
+                maxSize: EDITOR_FOCUS_INDICATOR_WIDTH,
+              },
+              {
+                component: rootNode.entries[dockIndex].component,
+                basis: 0,
+                grow: 1,
+                shrink: 1,
+                minSize: 1,
+              },
+            ],
+            { align: "stretch" },
+          )
+          : undefined;
+      const rootEntries = rootNode.entries.map((entry, index) => {
+        if (index === transcriptIndex)
+          return { ...entry, component: transcriptPane };
+        if (index === dockIndex && dockPane)
+          return { ...entry, component: dockPane };
+        return { ...entry };
+      });
       const installedRoot = new VStack(rootEntries, {
         gap: rootNode.gap,
         align: rootNode.align,
@@ -1434,11 +1529,19 @@ export default function transcriptFocus(
           embedWorkingStatus: true,
         })) as TranscriptEditor;
 
-      // Install the gutter beside Pi's transcript ScrollView before initial
-      // session messages are rendered. The transcript itself stays untouched;
-      // scrolling therefore keeps Pi's normal render path and performance.
-      if (tui.mode === "fullscreen" && installTranscriptLayout()) {
-        refreshTranscriptItems();
+      // Install the transcript gutter and editor-focus indicator before initial
+      // session messages are rendered. The transcript/editor components stay
+      // untouched; only Pi's fullscreen layout is composed around them.
+      if (tui.mode === "fullscreen") {
+        hidePiScrollIndicator();
+        if (
+          installTranscriptLayout(
+            theme.selectList.selectedPrefix,
+            theme.borderColor,
+          )
+        ) {
+          refreshTranscriptItems();
+        }
       }
 
       return editor;
@@ -1650,6 +1753,7 @@ export default function transcriptFocus(
       transcriptItemsCache = undefined;
       transcriptContentHeight = undefined;
       restoreTranscriptLayout();
+      restorePiScrollIndicator();
       if (focused && tui && editor) tui.setFocus(editor);
       ctx.ui.setEditorComponent(previousFactory);
       if (refreshActiveTranscript === refreshSelectionGeometry)

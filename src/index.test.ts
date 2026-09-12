@@ -307,9 +307,13 @@ function createHarness(options: HarnessOptions = {}) {
     primaryScrollView: privateScrollView,
   };
 
+  const defaultScrollToEndIndicator = () => "Jump to latest message";
   const tui = {
     mode: options.mode ?? "fullscreen",
     terminal: { rows: 30, columns: 100 },
+    scrollToEndIndicator: defaultScrollToEndIndicator as
+      | (() => string)
+      | undefined,
     children: [
       transcript.document,
       new FakeContainer(),
@@ -432,7 +436,16 @@ function createHarness(options: HarnessOptions = {}) {
     if (editorFactory) {
       installedEditor = editorFactory(
         tui,
-        { borderColor: (text: string) => text },
+        {
+          borderColor: (text: string) => text,
+          selectList: {
+            selectedPrefix: (text: string) => text,
+            selectedText: (text: string) => text,
+            description: (text: string) => text,
+            scrollInfo: (text: string) => text,
+            noMatch: (text: string) => text,
+          },
+        },
         {
           matches(data: string, action: string) {
             return (
@@ -525,9 +538,13 @@ function createHarness(options: HarnessOptions = {}) {
     return line.replace(/^┃/u, "│");
   };
 
+  const editorFocusIndicatorLines = (): string[] =>
+    layoutRoot?.children?.[1]?.children?.[0]?.render?.(1) ?? [];
+
   return {
     copiedTexts,
     editor,
+    editorFocusIndicatorLines,
     editorInputs,
     emit,
     input,
@@ -582,6 +599,10 @@ function createHarness(options: HarnessOptions = {}) {
     get scrollBottomCalls() {
       return scrollBottomCalls;
     },
+    get scrollToEndIndicator() {
+      return tui.scrollToEndIndicator;
+    },
+    defaultScrollToEndIndicator,
     get shutdownCalls() {
       return shutdownCalls;
     },
@@ -596,6 +617,41 @@ function createHarness(options: HarnessOptions = {}) {
     },
   };
 }
+
+test("fullscreen chrome hides Pi's scroll indicator and marks editor focus", () => {
+  const h = createHarness();
+  h.start();
+
+  assert.equal(h.scrollToEndIndicator, undefined);
+  assert.deepEqual(h.editorFocusIndicatorLines(), ["●", "●", "●"]);
+
+  h.input("\t");
+  assert.deepEqual(h.editorFocusIndicatorLines(), ["·", "·", "·"]);
+
+  h.input("\t");
+  assert.deepEqual(h.editorFocusIndicatorLines(), ["●", "●", "●"]);
+
+  h.shutdown();
+  assert.equal(h.scrollToEndIndicator, h.defaultScrollToEndIndicator);
+  assert.equal(h.layoutRoot, h.originalLayoutRoot);
+});
+
+test("hideDefaultScrollIndicator can preserve Pi's built-in label", () => {
+  const agentDir = mkdtempSync(join(tmpdir(), "pi-tab-focus-agent-"));
+  try {
+    writeFileSync(
+      join(agentDir, "pi-tab-focus.json"),
+      JSON.stringify({ hideDefaultScrollIndicator: false }),
+    );
+
+    const h = createHarness({ agentDir });
+    h.start();
+
+    assert.equal(h.scrollToEndIndicator, h.defaultScrollToEndIndicator);
+  } finally {
+    rmSync(agentDir, { recursive: true, force: true });
+  }
+});
 
 test("Tab selects the bottom visible item and re-entry preserves a visible selection", () => {
   const h = createHarness();
