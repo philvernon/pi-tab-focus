@@ -43,7 +43,7 @@ Press `Tab` to enter transcript focus. Press `Tab` or `Esc` to return to the edi
 | `y` / `c` | copy selected item or visual selection |
 | `v` | visual cursor / character selection |
 | `V` | line selection |
-| `Enter` | open a link in the selected item |
+| `Enter` | open the first link in the selected item; in visual mode, open the link under the cursor |
 | `:` | open EX mode when using `pi-vim` |
 | `Ctrl+O` | toggle tool output |
 | `Ctrl+T` | toggle thinking visibility |

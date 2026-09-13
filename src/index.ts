@@ -9,7 +9,6 @@ import {
   isKeyRelease,
   isKeyRepeat,
   matchesKey,
-  getOsc8LinkAtColumn,
   stripTerminalSequences,
   visibleWidth,
   type Component,
@@ -24,6 +23,10 @@ import {
   type PrivateScrollView,
 } from "./fullscreen-layout.ts";
 import { installTranscriptEditorBorderStyle } from "./fullscreen-ui.ts";
+import {
+  firstTranscriptLink,
+  transcriptLinkAtColumn,
+} from "./transcript-links.ts";
 import {
   VimVisualNavigation,
   compareVimPoints,
@@ -66,12 +69,12 @@ type TranscriptItem = {
   gutterStartRow: number;
   gutterEndRow: number;
   text: string;
+  linkSourceLines: string[];
 };
 
 const GRAPHEME_SEGMENTER = new Intl.Segmenter(undefined, {
   granularity: "grapheme",
 });
-const LITERAL_URL_PATTERN = /(?:https?:\/\/|file:\/\/|mailto:)[^\s<>()]+/gu;
 const TRANSCRIPT_LAYOUT_ACTIONS = [
   "app.tools.expand",
   "app.thinking.toggle",
@@ -487,6 +490,7 @@ export default function transcriptFocus(
           gutterStartRow: transcript.startRow + gutterStartRow,
           gutterEndRow: transcript.startRow + gutterEndRow,
           text,
+          linkSourceLines: lines,
         });
       }
 
@@ -1053,45 +1057,34 @@ export default function transcriptFocus(
       finishVisualMode();
     };
 
-    const literalUrlAtColumn = (
-      line: string,
-      col: number,
-    ): string | undefined => {
-      const stripped = stripTerminalSequences(line);
-      for (const match of stripped.matchAll(LITERAL_URL_PATTERN)) {
-        const text = match[0];
-        const start = visibleWidth(stripped.slice(0, match.index));
-        const end = start + visibleWidth(text);
-        if (col >= start && col < end) return text;
-      }
-      return undefined;
-    };
-
-    const firstLiteralUrl = (text: string): string | undefined =>
-      text.match(LITERAL_URL_PATTERN)?.[0];
-
-    const openSelectedLink = (): void => {
-      let url: string | undefined;
-      const head = visualSnapshot()?.head;
-      if (head) {
-        const line = sourceLine(head.row);
-        url =
-          getOsc8LinkAtColumn(line, head.col) ??
-          literalUrlAtColumn(line, head.col);
-      }
-      if (!url) {
-        const selected = selectedItemFrom(transcriptItems());
-        if (selected) url = firstLiteralUrl(selected.text);
-      }
-      if (!url) {
-        ctx.ui.notify("No link found in selected transcript item.", "info");
-        return;
-      }
+    const openUrl = (url: string): void => {
       try {
         tui?.openUrl?.(url);
       } catch {
         ctx.ui.notify(`Failed to open link: ${url}`, "error");
       }
+    };
+
+    const openVisualLink = (): void => {
+      const head = visualSnapshot()?.head;
+      if (!head) return;
+
+      const url = transcriptLinkAtColumn(sourceLine(head.row), head.col);
+      if (!url) {
+        ctx.ui.notify("No link under visual cursor.", "info");
+        return;
+      }
+      openUrl(url);
+    };
+
+    const openSelectedItemLink = (): void => {
+      const selected = selectedItemFrom(transcriptItems());
+      const url = selected ? firstTranscriptLink(selected.linkSourceLines) : undefined;
+      if (!url) {
+        ctx.ui.notify("No link found in selected transcript item.", "info");
+        return;
+      }
+      openUrl(url);
     };
 
     const enterExDetour = (): void => {
@@ -1135,7 +1128,7 @@ export default function transcriptFocus(
 
       if (result.command === "copy") copyVisualSelection();
       else if (result.command === "open-link") {
-        openSelectedLink();
+        openVisualLink();
         updateStatus();
       } else if (result.command === "ex") enterExDetour();
       else if (result.command === "exit") finishVisualMode();
@@ -1293,7 +1286,7 @@ export default function transcriptFocus(
       }
 
       if (matchesKey(data, Key.enter)) {
-        openSelectedLink();
+        openSelectedItemLink();
         return { consume: true };
       }
 

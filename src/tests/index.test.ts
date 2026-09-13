@@ -1253,7 +1253,7 @@ test("v and Escape back out from selection to visual mode before transcript mode
   assert.equal(h.focusedComponent, h.editor);
 });
 
-test("Enter follows literal transcript links", () => {
+test("Enter uses the item link outside visual mode and the cursor link inside it", () => {
   const h = createHarness({
     initialScrollTop: 0,
     replyText: "see https://example.com/path",
@@ -1266,10 +1266,30 @@ test("Enter follows literal transcript links", () => {
 
   h.input("v");
   h.input("\r");
+  assert.deepEqual(h.openedUrls, ["https://example.com/path"]);
+  assert.match(h.notifications.at(-1)?.message ?? "", /under visual cursor/);
+
+  h.input("W");
+  h.input("\r");
   assert.deepEqual(h.openedUrls, [
     "https://example.com/path",
     "https://example.com/path",
   ]);
+});
+
+test("visual Enter follows a rendered Markdown fallback label", () => {
+  const h = createHarness({
+    initialScrollTop: 0,
+    replyText:
+      "https://first.example \x1b[4mRead\x1b[24m (https://second.example)",
+  });
+  h.start();
+  h.input("\t");
+  h.input("v");
+  h.input("W");
+
+  h.input("\r");
+  assert.deepEqual(h.openedUrls, ["https://second.example"]);
 });
 
 test("copy mappings copy the selected item's unhighlighted rendered text", () => {

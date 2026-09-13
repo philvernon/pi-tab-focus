@@ -31,9 +31,9 @@
 
 ## Release necessities
 
-- [ ] **Make README link-opening behaviour accurate.**
-  - Either support opening the first OSC8 link from the selected item or describe the item-mode behaviour specifically as opening a literal URL.
-  - Verify the documented behaviour matches the implementation.
+- [x] **Document link-opening behaviour.**
+  - Item mode opens the first link in the selected transcript item.
+  - Visual mode opens the link under the cursor.
 
 - [ ] **Restore the printable `focusKey` warning.**
   - Document that an unmodified printable key such as `f` can intercept normal typing.
