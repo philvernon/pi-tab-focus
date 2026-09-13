@@ -322,14 +322,23 @@ export default function transcriptFocus(
       return columns;
     };
 
-    const clampRow = (row: number): number =>
-      transcriptContentHeight
-        ? Math.max(0, Math.min(transcriptContentHeight - 1, row))
+    const liveTranscriptContentHeight = (): number | undefined => {
+      const contentHeight = activeScrollView()?.contentHeight;
+      return typeof contentHeight === "number" && contentHeight > 0
+        ? contentHeight
+        : transcriptContentHeight;
+    };
+
+    const clampRow = (row: number): number => {
+      const contentHeight = liveTranscriptContentHeight();
+      return contentHeight
+        ? Math.max(0, Math.min(contentHeight - 1, row))
         : Math.max(0, row);
+    };
 
     const visualTextSource: VimTextSource = {
       get lineCount() {
-        return Math.max(1, transcriptContentHeight ?? 1);
+        return Math.max(1, liveTranscriptContentHeight() ?? 1);
       },
       get revision() {
         return visualSourceRevision;
@@ -508,6 +517,7 @@ export default function transcriptFocus(
 
     const markTranscriptGeometryDirty = (): void => {
       transcriptGeometryDirty = true;
+      if (inVisualMode()) invalidateVisualSource();
     };
     markActiveTranscriptGeometryDirty = markTranscriptGeometryDirty;
 

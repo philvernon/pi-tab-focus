@@ -45,7 +45,7 @@ class FakeScrollView extends FakeContainer {
   readonly child: any;
   scrollTop: number;
   viewportHeight: number;
-  private readonly maxScrollTop: number;
+  contentHeight: number;
   private readonly onScrollTo: (row: number) => void;
 
   constructor(
@@ -59,7 +59,7 @@ class FakeScrollView extends FakeContainer {
     this.child = child;
     this.scrollTop = scrollTop;
     this.viewportHeight = viewportHeight;
-    this.maxScrollTop = maxScrollTop;
+    this.contentHeight = maxScrollTop + viewportHeight;
     this.onScrollTo = onScrollTo;
   }
 
@@ -68,7 +68,8 @@ class FakeScrollView extends FakeContainer {
   }
 
   scrollTo(row: number): void {
-    this.scrollTop = Math.max(0, Math.min(this.maxScrollTop, row));
+    const maxScrollTop = Math.max(0, this.contentHeight - this.viewportHeight);
+    this.scrollTop = Math.max(0, Math.min(maxScrollTop, row));
     this.onScrollTo(this.scrollTop);
   }
 
@@ -96,6 +97,16 @@ class FakeText {
 
   constructor(lines: string[]) {
     this.lines = lines;
+  }
+
+  appendLine(line: string): void {
+    this.lines.push(line);
+  }
+
+  appendText(text: string): void {
+    const last = this.lines.length - 1;
+    if (last < 0) this.lines.push(text);
+    else this.lines[last] += text;
   }
 
   render(_width: number): string[] {
@@ -599,6 +610,13 @@ function createHarness(options: HarnessOptions = {}) {
     input,
     notifications,
     openedUrls,
+    appendDoneLine(text: string) {
+      transcript.done.appendLine(` ${text}`);
+      privateScrollView.contentHeight++;
+    },
+    appendDoneText(text: string) {
+      transcript.done.appendText(text);
+    },
     renderedFirstVisibleLine,
     renderedTranscriptLine,
     visualRenderedLine,
@@ -1158,6 +1176,34 @@ test("v enters visual mode and a second v starts character selection", async () 
   await new Promise<void>((resolve) => setTimeout(resolve, 0));
   assert.deepEqual(h.copiedTexts, ["hi"]);
   assert.match(h.statuses.get("pi-tab-focus") ?? "", /^TRANSCRIPT/);
+});
+
+test("visual mode can navigate into rows added by a streaming response", () => {
+  const h = createHarness({ initialScrollTop: 0 });
+  h.start();
+  h.input("\t");
+  h.input("v");
+
+  h.appendDoneLine("streamed tail");
+  h.emit("message_update");
+  h.input("G");
+
+  assert.equal(h.scrollTo.at(-1), 8);
+  assert.ok(h.visualRenderedLine(11).includes("\x1b[7ms\x1b[27m"));
+});
+
+test("visual mode sees text appended to a cached streaming line", () => {
+  const h = createHarness({ initialScrollTop: 7 });
+  h.start();
+  h.input("\t");
+  h.input("v");
+  h.input("G");
+
+  h.appendDoneText(" streamed");
+  h.emit("message_update");
+  h.input("$");
+
+  assert.ok(h.visualRenderedLine(10).includes("\x1b[7md\x1b[27m"));
 });
 
 test("visual cursor renders a full CJK grapheme", () => {

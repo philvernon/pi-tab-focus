@@ -13,6 +13,7 @@ import type { VimPoint } from "./vim-navigation.ts";
 export type PrivateScrollView = Component & {
   scrollTop: number;
   viewportHeight: number;
+  contentHeight?: number;
   primary?: boolean;
   getContentWidth?: (width: number) => number;
   scrollTo?: (scrollTop: number, options?: { disableFollow?: boolean }) => void;
