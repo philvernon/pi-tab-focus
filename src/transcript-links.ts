@@ -31,7 +31,7 @@ function underlineRanges(line: string): Array<{ start: number; end: number }> {
     const column = visibleWidth(stripTerminalSequences(line.slice(0, match.index)));
     const rawParams = match[1];
     const params = rawParams === "" ? ["0"] : rawParams.split(";");
-    let next = underlined;
+    let next: boolean = underlined;
 
     for (const param of params) {
       if (param === "" || param === "0" || param === "24" || param === "4:0") {

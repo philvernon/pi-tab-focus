@@ -35,11 +35,10 @@
   - Item mode opens the first link in the selected transcript item.
   - Visual mode opens the link under the cursor.
 
-- [ ] **Restore the printable `focusKey` warning.**
+- [x] **Restore the printable `focusKey` warning.**
   - Document that an unmodified printable key such as `f` can intercept normal typing.
   - Recommend modifier/function-style bindings for `focusKey`.
 
-- [ ] **Add a package/tarball smoke check.**
-  - Verify the npm tarball contains the intended runtime files and excludes development/test-only files.
-  - Prefer packing and installing the generated tarball in a temporary consumer project over only running `npm pack --dry-run`.
-  - Make the smoke check part of the release verification or CI path.
+- [ ] **Verify the npm package contents.**
+  - Run `npm pack --dry-run` in CI and as part of release verification.
+  - Confirm the output contains the intended runtime files and excludes development/test-only files such as `src/tests/` and `final_pass.md`.

@@ -81,4 +81,5 @@ Optional `pi-vim` integration is tested with `pi-vim` `0.14.2`.
 npm ci
 npm run typecheck
 npm test
+npm pack --dry-run
 ```
