@@ -25,9 +25,8 @@
   - Re-establish fullscreen integration against the current renderer when required.
   - Add tests covering regular → fullscreen and fullscreen → regular → fullscreen transitions.
 
-- [ ] **Restrict compatibility to versions actually verified.**
-  - Gate runtime compatibility to Pi `0.85.1` rather than automatically accepting future `0.85.x` patches.
-  - Update README compatibility wording to match the runtime gate.
+- [x] **Document the verified Pi version.**
+  - State that the extension is tested with Pi `0.85.1`.
   - Keep the Pi peer dependencies as `"*"`.
 
 ## Release necessities

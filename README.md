@@ -69,7 +69,7 @@ Set `hideDefaultScrollIndicator` to `false` if you want to keep Pi's built-in "J
 
 ## Compatibility
 
-Currently supports Pi `0.85.x` from `0.85.1` onward. On unsupported Pi versions, `pi-tab-focus` disables itself instead of loading against an unknown API version.
+Tested with Pi `0.85.1`.
 
 Optional `pi-vim` integration is tested with `pi-vim` `0.14.2`.
 
