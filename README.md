@@ -65,6 +65,8 @@ Visual mode supports familiar Vim-style navigation including `h/j/k/l`, word mot
 
 A trusted project can override this with `.pi/pi-tab-focus.json`. Use Pi's normal key format and run `/reload` after changing the config.
 
+Prefer modifier or function-key bindings for `focusKey` (for example `ctrl+g` or `f6`). An unmodified printable key such as `f` will intercept normal typing while Pi is in fullscreen mode.
+
 Set `hideDefaultScrollIndicator` to `false` if you want to keep Pi's built-in "Jump to latest message" indicator.
 
 ## Compatibility
