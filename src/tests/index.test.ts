@@ -1531,10 +1531,10 @@ test("works without pi-vim using Pi's CustomEditor", () => {
   assert.equal(h.focusedComponent, h.installedEditor);
 });
 
-test("non-fullscreen mode leaves the focus key available to Pi", () => {
+test("non-fullscreen mode leaves the focus key available to Pi silently", () => {
   const regular = createHarness({ mode: "regular" });
   regular.start();
   assert.equal(regular.input("\t"), undefined);
-  assert.match(regular.notifications[0]?.message ?? "", /fullscreen mode/);
+  assert.deepEqual(regular.notifications, []);
   assert.equal(regular.statuses.get("pi-tab-focus"), undefined);
 });

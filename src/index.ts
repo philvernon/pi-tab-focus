@@ -706,10 +706,6 @@ export default function transcriptFocus(
       if (next && tui?.mode !== "fullscreen") {
         focused = false;
         ctx.ui.setStatus("pi-tab-focus", undefined);
-        ctx.ui.notify(
-          "Transcript focus requires Pi fullscreen mode (--tui-mode fullscreen).",
-          "warning",
-        );
         return false;
       }
 
@@ -1220,12 +1216,8 @@ export default function transcriptFocus(
       }
 
       if (matchesFocusKey(data)) {
-        // If transcript focus cannot activate in the current TUI mode, leave the
-        // key available to Pi/editor handling instead of swallowing it.
-        if (!focused && tui?.mode !== "fullscreen") {
-          if (!isKeyRepeat(data)) enterTranscriptMode();
-          return undefined;
-        }
+        // Outside fullscreen, the configured focus key belongs entirely to Pi.
+        if (!focused && tui?.mode !== "fullscreen") return undefined;
 
         // Holding the focus key must not repeatedly flip focus on key-repeat events.
         if (!isKeyRepeat(data)) {
