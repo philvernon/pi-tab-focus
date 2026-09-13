@@ -1521,6 +1521,13 @@ export default function transcriptFocus(
       }
 
       if (matchesFocusKey(data)) {
+        // If transcript focus cannot activate in the current TUI mode, leave the
+        // key available to Pi/editor handling instead of swallowing it.
+        if (!focused && tui?.mode !== "fullscreen") {
+          if (!isKeyRepeat(data)) enterTranscriptMode();
+          return undefined;
+        }
+
         // Holding the focus key must not repeatedly flip focus on key-repeat events.
         if (!isKeyRepeat(data)) {
           if (inVisualMode()) finishVisualMode({ restoreGutter: false });
