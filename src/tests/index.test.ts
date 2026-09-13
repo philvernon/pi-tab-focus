@@ -817,10 +817,11 @@ test("Ctrl+D shuts down and Ctrl+C returns control to Pi", () => {
   cancel.start();
   cancel.input("\t");
   cancel.input("v");
-  assert.match(cancel.visualRenderedLine(3), new RegExp(CURSOR_MARKER));
+  assert.doesNotMatch(cancel.visualRenderedLine(3), new RegExp(CURSOR_MARKER));
+  assert.match(cancel.visualRenderedLine(3), /\x1b\[7m/u);
   assert.deepEqual(cancel.input("\x03"), { consume: true });
   assert.equal(cancel.focusedComponent, cancel.editor);
-  assert.doesNotMatch(cancel.visualRenderedLine(3), new RegExp(CURSOR_MARKER));
+  assert.doesNotMatch(cancel.visualRenderedLine(3), /\x1b\[7m/u);
   assert.equal(cancel.input("\x03"), undefined);
   assert.deepEqual(cancel.editorInputs, ["\x03"]);
 });
@@ -1022,7 +1023,8 @@ test("v enters visual mode and a second v starts character selection", async () 
   assert.deepEqual(h.input("v"), { consume: true });
   assert.match(h.statuses.get("pi-tab-focus") ?? "", /^VISUAL NAV/);
   assert.equal(h.selectionText(), undefined);
-  assert.match(h.visualRenderedLine(3), new RegExp(CURSOR_MARKER));
+  assert.doesNotMatch(h.visualRenderedLine(3), new RegExp(CURSOR_MARKER));
+  assert.match(h.visualRenderedLine(3), /\x1b\[7m/u);
   assert.doesNotMatch(h.renderedFirstVisibleLine(h.transcript.reply), /^│/);
 
   assert.deepEqual(h.input("v"), { consume: true });
@@ -1030,6 +1032,7 @@ test("v enters visual mode and a second v starts character selection", async () 
   assert.equal(h.selectionGranularity, "character");
   assert.equal(h.selectionText(), "h");
   assert.doesNotMatch(h.visualRenderedLine(3), new RegExp(CURSOR_MARKER));
+  assert.doesNotMatch(h.visualRenderedLine(3), /\x1b\[7m/u);
   assert.equal(
     stripTerminalSequences(h.visualRenderedLine(3)),
     " hi, how can i help?",
@@ -1042,6 +1045,31 @@ test("v enters visual mode and a second v starts character selection", async () 
   await new Promise<void>((resolve) => setTimeout(resolve, 0));
   assert.deepEqual(h.copiedTexts, ["hi"]);
   assert.match(h.statuses.get("pi-tab-focus") ?? "", /^TRANSCRIPT/);
+});
+
+test("visual cursor renders a full CJK grapheme", () => {
+  const h = createHarness({ initialScrollTop: 0, replyText: "界x" });
+  h.start();
+  h.input("\t");
+  h.input("v");
+
+  const rendered = h.visualRenderedLine(3);
+  assert.doesNotMatch(rendered, new RegExp(CURSOR_MARKER));
+  assert.ok(rendered.includes("\x1b[7m界\x1b[27m"));
+  assert.ok(rendered.endsWith("x"));
+});
+
+test("visual cursor renders a full multi-codepoint emoji grapheme", () => {
+  const emoji = "👩‍💻";
+  const h = createHarness({ initialScrollTop: 0, replyText: `${emoji}x` });
+  h.start();
+  h.input("\t");
+  h.input("v");
+
+  const rendered = h.visualRenderedLine(3);
+  assert.doesNotMatch(rendered, new RegExp(CURSOR_MARKER));
+  assert.ok(rendered.includes(`\x1b[7m${emoji}\x1b[27m`));
+  assert.ok(rendered.endsWith("x"));
 });
 
 test("visual mode supports Vim word motion and viw text objects", async () => {
@@ -1116,7 +1144,8 @@ test("v and Escape back out from selection to visual mode before transcript mode
   assert.equal(h.selectionText(), undefined);
   assert.match(h.statuses.get("pi-tab-focus") ?? "", /^VISUAL NAV/);
   assert.equal(h.focusedComponent, null);
-  assert.match(h.visualRenderedLine(3), new RegExp(CURSOR_MARKER));
+  assert.doesNotMatch(h.visualRenderedLine(3), new RegExp(CURSOR_MARKER));
+  assert.match(h.visualRenderedLine(3), /\x1b\[7m/u);
 
   h.input("v");
   assert.equal(h.selectionText(), "h");

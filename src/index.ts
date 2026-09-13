@@ -6,7 +6,6 @@ import {
   type ExtensionAPI,
 } from "@earendil-works/pi-coding-agent";
 import {
-  CURSOR_MARKER,
   HStack,
   Key,
   VStack,
@@ -260,6 +259,19 @@ function privateLayoutNode(
     : undefined;
 }
 
+function graphemeWidthAtColumn(line: string, col: number): number {
+  const stripped = stripTerminalSequences(line);
+  let currentCol = 0;
+
+  for (const { segment } of GRAPHEME_SEGMENTER.segment(stripped)) {
+    const width = Math.max(0, visibleWidth(segment));
+    if (width > 0 && col >= currentCol && col < currentCol + width) return width;
+    currentCol += width;
+  }
+
+  return 1;
+}
+
 class VisualCursorContentProxy implements Component {
   private readonly component: Component;
   private readonly getCursor: () => VimPoint | undefined;
@@ -284,23 +296,20 @@ class VisualCursorContentProxy implements Component {
     const lineWidth = visibleWidth(line);
     const col = Math.max(0, Math.min(cursor.col, lineWidth));
     const before = sliceByColumn(line, 0, col, true);
+    const cursorWidth =
+      col >= lineWidth ? 1 : graphemeWidthAtColumn(line, col);
     const atCursor =
       col >= lineWidth
         ? " "
-        : sliceByColumn(
-          line,
-          col,
-          Math.max(1, visibleWidth(sliceByColumn(line, col, 1, true))),
-          true,
-        );
+        : sliceByColumn(line, col, cursorWidth, false) || " ";
     const after = sliceByColumn(
       line,
-      col + visibleWidth(atCursor),
-      Math.max(0, lineWidth - col - visibleWidth(atCursor)),
+      col + cursorWidth,
+      Math.max(0, lineWidth - col - cursorWidth),
       true,
     );
     lines[cursor.row] =
-      `${before}${CURSOR_MARKER}\x1b[7m${atCursor}\x1b[27m${after}`;
+      `${before}\x1b[7m${atCursor}\x1b[27m${after}`;
     return lines;
   }
 
