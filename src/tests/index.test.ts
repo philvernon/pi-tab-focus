@@ -954,16 +954,38 @@ test("completed message and tool events refresh cached transcript geometry", asy
   assert.match(h.renderedFirstVisibleLine(h.transcript.reply), /^│/);
 });
 
-test("line scrolling reuses cached transcript rows while selection remains visible", () => {
+test("line scrolling reuses cached transcript rows when auto-selection moves", () => {
   const h = createHarness({ initialScrollTop: 0 });
   h.start();
   h.input("\t");
 
   const rendersBeforeScroll = h.transcriptRenderCount();
   h.input("j");
-
-  assert.equal(h.transcriptRenderCount(), rendersBeforeScroll);
+  h.input("j");
+  h.input("j");
   assert.match(h.statuses.get("pi-tab-focus") ?? "", /message 2\/6/);
+
+  h.input("j");
+  assert.match(h.statuses.get("pi-tab-focus") ?? "", /prompt 3\/6/);
+  assert.equal(h.transcriptRenderCount(), rendersBeforeScroll);
+});
+
+test("streaming updates defer geometry refresh until auto-selection needs it", () => {
+  const h = createHarness({ initialScrollTop: 0 });
+  h.start();
+  h.input("\t");
+
+  const rendersBeforeStreamUpdate = h.transcriptRenderCount();
+  h.emit("message_update");
+
+  h.input("j");
+  assert.equal(h.transcriptRenderCount(), rendersBeforeStreamUpdate);
+
+  h.input("j");
+  h.input("j");
+  h.input("j");
+  assert.ok(h.transcriptRenderCount() > rendersBeforeStreamUpdate);
+  assert.match(h.statuses.get("pi-tab-focus") ?? "", /prompt 3\/6/);
 });
 
 test("permanent gutter lives in the fullscreen layout without wrapping transcript renders", () => {

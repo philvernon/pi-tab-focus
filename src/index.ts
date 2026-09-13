@@ -226,11 +226,14 @@ export default function transcriptFocus(
 ): void {
   let cleanupSession: (() => void) | undefined;
   let refreshActiveTranscript: (() => void) | undefined;
+  let markActiveTranscriptGeometryDirty: (() => void) | undefined;
 
   const scheduleTranscriptRefresh = (): void => {
     setTimeout(() => refreshActiveTranscript?.(), 0);
   };
 
+  pi.on("message_update", () => markActiveTranscriptGeometryDirty?.());
+  pi.on("tool_execution_update", () => markActiveTranscriptGeometryDirty?.());
   pi.on("message_end", scheduleTranscriptRefresh);
   pi.on("tool_execution_end", scheduleTranscriptRefresh);
 
@@ -260,6 +263,7 @@ export default function transcriptFocus(
     let selectedSemanticKey: string | undefined;
     let transcriptItemsCache: TranscriptItem[] | undefined;
     let transcriptContentHeight: number | undefined;
+    let transcriptGeometryDirty = false;
     let fullscreenLayout: FullscreenLayoutController;
     let restoreEditorBorderStyle: (() => void) | undefined;
     let visualSourceRevision = 0;
@@ -407,6 +411,7 @@ export default function transcriptFocus(
     };
 
     const refreshTranscriptItems = (): TranscriptItem[] => {
+      transcriptGeometryDirty = false;
       invalidateVisualSource();
       if (!tui) {
         transcriptContentHeight = undefined;
@@ -500,6 +505,11 @@ export default function transcriptFocus(
 
     const transcriptItems = (): TranscriptItem[] =>
       transcriptItemsCache ?? refreshTranscriptItems();
+
+    const markTranscriptGeometryDirty = (): void => {
+      transcriptGeometryDirty = true;
+    };
+    markActiveTranscriptGeometryDirty = markTranscriptGeometryDirty;
 
     const showSelection = (item: TranscriptItem): void => {
       fullscreenLayout.setSelection(item);
@@ -853,13 +863,14 @@ export default function transcriptFocus(
       let current = selectedItemFrom(items);
       if (current && itemIsVisible(current, bounds)) return;
 
-      // Item row ranges are expensive to calculate because Pi does not expose
-      // them directly. Keep line scrolling on the cached snapshot and only
-      // rebuild it when the current selection appears to leave the viewport.
-      // This also refreshes rows changed by a streaming assistant/tool block.
-      items = refreshTranscriptItems();
-      current = selectedItemFrom(items);
-      if (current && itemIsVisible(current, bounds)) return;
+      // Stable transcripts reuse cached geometry even when auto-selection moves.
+      // While output is actively streaming, refresh only when stale geometry
+      // actually reaches a selection boundary.
+      if (transcriptGeometryDirty) {
+        items = refreshTranscriptItems();
+        current = selectedItemFrom(items);
+        if (current && itemIsVisible(current, bounds)) return;
+      }
 
       const visibleItems = items.filter((item) => itemIsVisible(item, bounds));
       // Keep selection attached to the viewport edge it leaves through. When
@@ -1385,6 +1396,8 @@ export default function transcriptFocus(
       ctx.ui.setEditorComponent(previousFactory);
       if (refreshActiveTranscript === refreshSelectionGeometry)
         refreshActiveTranscript = undefined;
+      if (markActiveTranscriptGeometryDirty === markTranscriptGeometryDirty)
+        markActiveTranscriptGeometryDirty = undefined;
 
       ctx.ui.setStatus("pi-tab-focus", undefined);
       focused = false;
