@@ -16,7 +16,7 @@ type Handler = (...args: any[]) => any;
 const LAYOUT_NODE = Symbol.for("@earendil-works/pi-tui/layout-node");
 
 type HarnessOptions = {
-  mode?: "fullscreen" | "inline";
+  mode?: "fullscreen" | "regular";
   withEditor?: boolean;
   initialScrollTop?: number;
   viewportHeight?: number;
@@ -299,23 +299,40 @@ function createHarness(options: HarnessOptions = {}) {
   };
 
   const maxScrollTop = 7;
-  const privateScrollView = new FakeScrollView(
+  const makeScrollView = (scrollTop: number) =>
+    new FakeScrollView(
+      transcript.document,
+      scrollTop,
+      options.viewportHeight ?? 4,
+      maxScrollTop,
+      (row) => scrollTo.push(row),
+    );
+  const makeLayoutRoot = (scrollView: FakeScrollView) =>
+    new FakeVStack([
+      { component: scrollView, basis: 0, grow: 1, shrink: 1, minSize: 1 },
+      {
+        component: new FakeContainer(),
+        basis: "auto",
+        grow: 0,
+        shrink: 1,
+        minSize: 1,
+      },
+    ]);
+
+  let privateScrollView = makeScrollView(options.initialScrollTop ?? maxScrollTop);
+  const originalLayoutRoot = makeLayoutRoot(privateScrollView);
+  let layoutRoot: any =
+    options.mode === "regular" ? undefined : originalLayoutRoot;
+  let currentLayout: any = layoutRoot
+    ? { root: { component: layoutRoot }, primaryScrollView: privateScrollView }
+    : undefined;
+  let tuiChildren = [
     transcript.document,
-    options.initialScrollTop ?? maxScrollTop,
-    options.viewportHeight ?? 4,
-    maxScrollTop,
-    (row) => scrollTo.push(row),
-  );
-  const dock = new FakeContainer();
-  const originalLayoutRoot = new FakeVStack([
-    { component: privateScrollView, basis: 0, grow: 1, shrink: 1, minSize: 1 },
-    { component: dock, basis: "auto", grow: 0, shrink: 1, minSize: 1 },
-  ]);
-  let layoutRoot: any = originalLayoutRoot;
-  let currentLayout: any = {
-    root: { component: layoutRoot },
-    primaryScrollView: privateScrollView,
-  };
+    new FakeContainer(),
+    new FakeContainer(),
+    new FakeContainer(),
+    new FakeContainer(),
+  ];
 
   const defaultScrollToEndIndicator = () => "Jump to latest message";
   const tui = {
@@ -324,13 +341,9 @@ function createHarness(options: HarnessOptions = {}) {
     scrollToEndIndicator: defaultScrollToEndIndicator as
       | (() => string)
       | undefined,
-    children: [
-      transcript.document,
-      new FakeContainer(),
-      new FakeContainer(),
-      new FakeContainer(),
-      new FakeContainer(),
-    ],
+    get children() {
+      return tuiChildren;
+    },
     get layoutRoot() {
       return layoutRoot;
     },
@@ -393,6 +406,34 @@ function createHarness(options: HarnessOptions = {}) {
       openedUrls.push(url);
     },
     requestRender() {},
+  };
+
+  const switchTuiMode = (mode: "fullscreen" | "regular") => {
+    const scrollTop = privateScrollView.scrollTop;
+    tui.mode = mode;
+    tuiChildren = [
+      transcript.document,
+      new FakeContainer(),
+      new FakeContainer(),
+      new FakeContainer(),
+      new FakeContainer(),
+    ];
+    privateScrollView = makeScrollView(scrollTop);
+    tui.scrollToEndIndicator = defaultScrollToEndIndicator;
+
+    if (mode === "fullscreen") {
+      layoutRoot = makeLayoutRoot(privateScrollView);
+      currentLayout = {
+        root: { component: layoutRoot },
+        primaryScrollView: privateScrollView,
+      };
+    } else {
+      layoutRoot = undefined;
+      currentLayout = undefined;
+    }
+
+    focusedComponent = installedEditor ?? editor;
+    return layoutRoot;
   };
 
   const previousFactory =
@@ -584,8 +625,11 @@ function createHarness(options: HarnessOptions = {}) {
         transcript.done,
       ].reduce((total, component) => total + component.renderCount, 0);
     },
-    privateScrollView,
+    get privateScrollView() {
+      return privateScrollView;
+    },
     originalLayoutRoot,
+    switchTuiMode,
     selectionText() {
       return activeSelectionText(tui.selectionAnchor, tui.selectionFocus);
     },
@@ -650,6 +694,53 @@ test("fullscreen UI hides Pi's scroll indicator and changes editor borders in tr
   assert.equal(h.editor.renderTopBorder, h.originalRenderTopBorder);
   assert.equal(h.editor.renderBottomBorder, h.originalRenderBottomBorder);
   assert.equal(h.layoutRoot, h.originalLayoutRoot);
+});
+
+test("runtime switch from regular to fullscreen installs transcript integration", () => {
+  const h = createHarness({ mode: "regular", initialScrollTop: 0 });
+  h.start();
+
+  assert.equal(h.layoutRoot, undefined);
+  assert.equal(h.scrollToEndIndicator, h.defaultScrollToEndIndicator);
+
+  const fullscreenRoot = h.switchTuiMode("fullscreen");
+  const fullscreenScrollView = h.privateScrollView;
+  assert.equal(h.layoutRoot, fullscreenRoot);
+  assert.equal(h.scrollToEndIndicator, h.defaultScrollToEndIndicator);
+
+  assert.deepEqual(h.input("\t"), { consume: true });
+  assert.notEqual(h.layoutRoot, fullscreenRoot);
+  assert.equal(h.privateScrollView, fullscreenScrollView);
+  assert.equal(h.scrollToEndIndicator, undefined);
+  assert.equal(h.focusedComponent, null);
+  assert.match(h.statuses.get("pi-tab-focus") ?? "", /^TRANSCRIPT/);
+  assert.match(h.renderedFirstVisibleLine(h.transcript.reply), /^│/);
+});
+
+test("runtime fullscreen round-trip replaces stale transcript integration", () => {
+  const h = createHarness({ initialScrollTop: 0 });
+  h.start();
+
+  const firstInstalledRoot = h.layoutRoot;
+  const firstScrollView = h.privateScrollView;
+  assert.equal(h.scrollToEndIndicator, undefined);
+
+  h.switchTuiMode("regular");
+  const secondOriginalRoot = h.switchTuiMode("fullscreen");
+  const secondScrollView = h.privateScrollView;
+
+  assert.notEqual(secondScrollView, firstScrollView);
+  assert.equal(h.layoutRoot, secondOriginalRoot);
+  assert.equal(h.scrollToEndIndicator, h.defaultScrollToEndIndicator);
+
+  assert.deepEqual(h.input("\t"), { consume: true });
+  assert.notEqual(h.layoutRoot, secondOriginalRoot);
+  assert.notEqual(h.layoutRoot, firstInstalledRoot);
+  assert.equal(h.privateScrollView, secondScrollView);
+  assert.equal(h.scrollToEndIndicator, undefined);
+  assert.equal(h.focusedComponent, null);
+  assert.match(h.statuses.get("pi-tab-focus") ?? "", /^TRANSCRIPT/);
+  assert.match(h.renderedFirstVisibleLine(h.transcript.reply), /^│/);
 });
 
 test("hideDefaultScrollIndicator can preserve Pi's built-in label", () => {
@@ -1421,9 +1512,9 @@ test("works without pi-vim using Pi's CustomEditor", () => {
 });
 
 test("non-fullscreen mode leaves the focus key available to Pi", () => {
-  const inline = createHarness({ mode: "inline" });
-  inline.start();
-  assert.equal(inline.input("\t"), undefined);
-  assert.match(inline.notifications[0]?.message ?? "", /fullscreen mode/);
-  assert.equal(inline.statuses.get("pi-tab-focus"), undefined);
+  const regular = createHarness({ mode: "regular" });
+  regular.start();
+  assert.equal(regular.input("\t"), undefined);
+  assert.match(regular.notifications[0]?.message ?? "", /fullscreen mode/);
+  assert.equal(regular.statuses.get("pi-tab-focus"), undefined);
 });

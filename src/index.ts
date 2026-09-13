@@ -141,6 +141,7 @@ type TranscriptLayoutInstallation = {
   installedRoot: Component;
   scrollView: PrivateScrollView;
   gutter: TranscriptGutterComponent;
+  rendererChildren: Component[];
 };
 
 const LAYOUT_NODE = Symbol.for("@earendil-works/pi-tui/layout-node");
@@ -502,6 +503,7 @@ export default function transcriptFocus(
     let transcriptContentHeight: number | undefined;
     let transcriptLayout: TranscriptLayoutInstallation | undefined;
     let restoreScrollIndicator: (() => void) | undefined;
+    let scrollIndicatorRendererChildren: Component[] | undefined;
     let restoreEditorBorderStyle: (() => void) | undefined;
     let visualSourceRevision = 0;
     const visualLineCache = new Map<number, VimCell[]>();
@@ -691,9 +693,41 @@ export default function transcriptFocus(
         align: rootNode.align,
       });
 
-      transcriptLayout = { originalRoot, installedRoot, scrollView, gutter };
+      transcriptLayout = {
+        originalRoot,
+        installedRoot,
+        scrollView,
+        gutter,
+        rendererChildren: tui.children,
+      };
       tui.setLayoutRoot(installedRoot);
       return true;
+    };
+
+    const currentLayoutRoot = (): Component | undefined =>
+      tui?.currentLayout?.root?.component ?? tui?.layoutRoot;
+
+    const restoreCurrentScrollIndicator = (): void => {
+      if (
+        restoreScrollIndicator &&
+        tui &&
+        scrollIndicatorRendererChildren === tui.children
+      ) {
+        restoreScrollIndicator();
+      }
+      restoreScrollIndicator = undefined;
+      scrollIndicatorRendererChildren = undefined;
+    };
+
+    const abandonScrollIndicatorRestorer = (): void => {
+      restoreScrollIndicator = undefined;
+      scrollIndicatorRendererChildren = undefined;
+    };
+
+    const clearTranscriptLayoutCache = (): void => {
+      transcriptItemsCache = undefined;
+      transcriptContentHeight = undefined;
+      invalidateVisualSource();
     };
 
     const restoreTranscriptLayout = (): void => {
@@ -702,12 +736,57 @@ export default function transcriptFocus(
       transcriptLayout = undefined;
 
       if (tui?.setLayoutRoot) {
-        const currentRoot =
-          tui.currentLayout?.root?.component ?? tui.layoutRoot;
+        const currentRoot = currentLayoutRoot();
         if (!currentRoot || currentRoot === installation.installedRoot) {
           tui.setLayoutRoot(installation.originalRoot);
         }
       }
+    };
+
+    const ensureFullscreenIntegration = (): boolean => {
+      if (!tui) return false;
+
+      const installation = transcriptLayout;
+      if (installation) {
+        const sameRenderer = installation.rendererChildren === tui.children;
+        const stillInstalled =
+          tui.mode === "fullscreen" &&
+          sameRenderer &&
+          currentLayoutRoot() === installation.installedRoot;
+
+        if (!stillInstalled) {
+          installation.gutter.setSelection(undefined);
+          transcriptLayout = undefined;
+          clearTranscriptLayoutCache();
+          if (sameRenderer) restoreCurrentScrollIndicator();
+          else abandonScrollIndicatorRestorer();
+        }
+      } else if (
+        restoreScrollIndicator &&
+        scrollIndicatorRendererChildren !== tui.children
+      ) {
+        abandonScrollIndicatorRestorer();
+      }
+
+      if (tui.mode !== "fullscreen") {
+        restoreCurrentScrollIndicator();
+        return false;
+      }
+
+      if (!transcriptLayout && !installTranscriptLayout()) return false;
+
+      if (!restoreScrollIndicator) {
+        const restore = suppressDefaultScrollIndicator(
+          tui,
+          hideDefaultScrollIndicator,
+        );
+        if (restore) {
+          restoreScrollIndicator = restore;
+          scrollIndicatorRendererChildren = tui.children;
+        }
+      }
+
+      return true;
     };
 
     const componentKey = (
@@ -870,6 +949,25 @@ export default function transcriptFocus(
       }
     };
 
+    const reconcileFullscreenMode = (): boolean => {
+      const integrated = ensureFullscreenIntegration();
+      if (tui?.mode === "fullscreen") return integrated;
+
+      if (inVisualMode()) {
+        visualNavigation = undefined;
+        visualWidth = undefined;
+        clearNativeTextSelection();
+      }
+
+      if (focused) {
+        focused = false;
+        ctx.ui.setStatus("pi-tab-focus", undefined);
+        if (tui && editor) tui.setFocus(editor);
+      }
+
+      return false;
+    };
+
     const applyVisualSelection = (): void => {
       const visual = visualSnapshot();
       if (!tui || !visual?.anchor || !visual.selectionKind) {
@@ -961,8 +1059,9 @@ export default function transcriptFocus(
     };
 
     const refreshSelectionGeometry = (): void => {
+      reconcileFullscreenMode();
       transcriptItemsCache = undefined;
-      if (!focused && !exDetour) return;
+      if (tui?.mode !== "fullscreen" || (!focused && !exDetour)) return;
 
       const items = refreshTranscriptItems();
       const selected = selectedItemFrom(items);
@@ -1004,6 +1103,7 @@ export default function transcriptFocus(
     };
 
     const setFocused = (next: boolean): boolean => {
+      if (next) ensureFullscreenIntegration();
       if (next && tui?.mode !== "fullscreen") {
         focused = false;
         ctx.ui.setStatus("pi-tab-focus", undefined);
@@ -1469,17 +1569,14 @@ export default function transcriptFocus(
       // Keep Pi's editor rendering intact and only swap its horizontal border
       // glyph while transcript mode is active. This preserves border colours,
       // embedded working status, overflow labels and compatible custom editors.
-      if (tui.mode === "fullscreen") {
-        restoreEditorBorderStyle = installTranscriptEditorBorderStyle(
-          editor,
-          () => focused,
-        );
-        restoreScrollIndicator ??= suppressDefaultScrollIndicator(
-          tui,
-          hideDefaultScrollIndicator,
-        );
-        if (installTranscriptLayout()) refreshTranscriptItems();
-      }
+      // The editor survives runtime TUI renderer switches, so install this once
+      // regardless of the renderer mode in which the session started.
+      restoreEditorBorderStyle = installTranscriptEditorBorderStyle(
+        editor,
+        () => focused,
+      );
+
+      if (ensureFullscreenIntegration()) refreshTranscriptItems();
 
       return editor;
     });
@@ -1487,6 +1584,11 @@ export default function transcriptFocus(
     // Transcript focus is an input mode, not an editor implementation. Handle it
     // before input reaches the editor and consume only keys owned by transcript mode.
     const unsubscribeTerminalInput = ctx.ui.onTerminalInput((data) => {
+      // Pi can replace the active renderer at runtime without rebuilding the
+      // custom editor. Reconcile cached fullscreen integration before touching
+      // focus, viewport or selection state for this input event.
+      reconcileFullscreenMode();
+
       // When another Pi/custom component has actual TUI focus, it owns input.
       // This covers select/confirm/input/editor prompts and capturing overlays.
       if (transientUiHasFocus()) {
@@ -1697,8 +1799,7 @@ export default function transcriptFocus(
       transcriptItemsCache = undefined;
       transcriptContentHeight = undefined;
       restoreTranscriptLayout();
-      restoreScrollIndicator?.();
-      restoreScrollIndicator = undefined;
+      restoreCurrentScrollIndicator();
       restoreEditorBorderStyle?.();
       restoreEditorBorderStyle = undefined;
       if (focused && tui && editor) tui.setFocus(editor);

@@ -19,7 +19,7 @@
   - Render the visual cursor correctly on CJK characters, emoji and other wide graphemes.
   - Add tests covering at least CJK and emoji cursor positions.
 
-- [ ] **Handle runtime TUI mode switching safely.**
+- [x] **Handle runtime TUI mode switching safely.**
   - Ensure switching from regular mode to fullscreen installs the transcript fullscreen integration on the active renderer.
   - Ensure switching from fullscreen to regular and back to fullscreen does not reuse stale layout, scroll-view, gutter or root references.
   - Re-establish fullscreen integration against the current renderer when required.
