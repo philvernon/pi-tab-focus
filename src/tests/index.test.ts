@@ -28,13 +28,24 @@ type HarnessOptions = {
 
 class FakeContainer {
   children: any[];
+  mouseLayout:
+    | { width: number; children: Array<{ component: any; height: number }> }
+    | undefined;
 
   constructor(children: any[] = []) {
     this.children = children;
   }
 
   render(width: number): string[] {
-    return this.children.flatMap((child) => child.render(width));
+    const lines: string[] = [];
+    const mouseChildren: Array<{ component: any; height: number }> = [];
+    for (const child of this.children) {
+      const childLines = child.render(width);
+      mouseChildren.push({ component: child, height: childLines.length });
+      lines.push(...childLines);
+    }
+    this.mouseLayout = { width, children: mouseChildren };
+    return lines;
   }
 
   invalidate(): void {}
@@ -190,14 +201,14 @@ function createTranscriptTree(
     done,
     ...extras,
   ]);
-  const document = new FakeContainer([
-    new FakeText(["header"]),
-    new FakeContainer(),
-    chat,
-  ]);
+  const header = new FakeText(["header"]);
+  const loadedResources = new FakeContainer();
+  const document = new FakeContainer([header, loadedResources, chat]);
 
   return {
     document,
+    header,
+    loadedResources,
     chat,
     prompt,
     reply,
@@ -490,7 +501,9 @@ function createHarness(options: HarnessOptions = {}) {
     options.agentDir ?? "/__pi-tab-focus-tests__/agent",
   );
 
-  const start = () => {
+  const renderFrame = () => transcript.document.render(99);
+
+  const start = (beforeInitialRender?: () => void) => {
     handlers.get("session_start")?.(
       { type: "session_start", reason: "startup" },
       ctx,
@@ -527,6 +540,13 @@ function createHarness(options: HarnessOptions = {}) {
       }
       focusedComponent = installedEditor;
     }
+
+    beforeInitialRender?.();
+
+    // Pi renders the mounted transcript after extension binding. The production
+    // plugin observes that normal frame instead of rendering transcript children
+    // itself, so mirror that startup frame explicitly in the harness.
+    renderFrame();
   };
 
   const input = (data: string) => {
@@ -619,6 +639,7 @@ function createHarness(options: HarnessOptions = {}) {
     },
     renderedFirstVisibleLine,
     renderedTranscriptLine,
+    renderFrame,
     visualRenderedLine,
     scrollBy,
     scrollTo,
@@ -800,6 +821,104 @@ test("Tab selects the bottom visible item and re-entry preserves a visible selec
   assert.equal(h.focusedComponent, h.editor);
 });
 
+test("history rendered after session_start is observed for pi -c style startup", () => {
+  const h = createHarness({
+    initialScrollTop: 0,
+    viewportHeight: 100,
+  });
+  const history = [...h.transcript.chat.children];
+  h.transcript.chat.children.splice(0);
+
+  h.start(() => {
+    // Pi binds extensions before rendering resumed/history messages.
+    h.transcript.chat.children.push(...history);
+  });
+
+  h.input("\t");
+  assert.match(h.statuses.get("pi-tab-focus") ?? "", /message 6\/6/);
+  assert.match(h.renderedFirstVisibleLine(h.transcript.done), /^│/);
+});
+
+test("wholesale transcript rebuilds are discovered without session events", () => {
+  const h = createHarness({
+    initialScrollTop: 0,
+    viewportHeight: 100,
+  });
+  h.start();
+  h.input("\t");
+
+  const compactedPrompt = new UserMessageComponent("after compaction");
+  const compactedReply = new AssistantMessageComponent("summary tail");
+  h.transcript.chat.children.splice(
+    0,
+    h.transcript.chat.children.length,
+    compactedPrompt,
+    compactedReply,
+  );
+  h.renderFrame();
+
+  h.input("J");
+  assert.match(h.statuses.get("pi-tab-focus") ?? "", /prompt 1\/2/);
+  h.input("J");
+  assert.match(h.statuses.get("pi-tab-focus") ?? "", /message 2\/2/);
+
+  const treePrompt = new UserMessageComponent("other branch");
+  const treeReply = new AssistantMessageComponent("branch answer");
+  const treeCustom = new CustomMessageComponent([" branch metadata"]);
+  h.transcript.chat.children.splice(
+    0,
+    h.transcript.chat.children.length,
+    treePrompt,
+    treeReply,
+    treeCustom,
+  );
+  h.renderFrame();
+
+  h.input("J");
+  assert.match(h.statuses.get("pi-tab-focus") ?? "", /prompt 1\/3/);
+  h.input("J");
+  assert.match(h.statuses.get("pi-tab-focus") ?? "", /message 2\/3/);
+  h.input("J");
+  assert.match(h.statuses.get("pi-tab-focus") ?? "", /custom 3\/3/);
+});
+
+test("bash and custom transcript additions are discovered by rendering alone", () => {
+  const h = createHarness({
+    initialScrollTop: 0,
+    viewportHeight: 100,
+  });
+  h.start();
+  h.input("\t");
+
+  const bash = new BashExecutionComponent([" $ pwd"]);
+  const custom = new CustomMessageComponent([" custom notice"]);
+  h.transcript.chat.children.push(bash, custom);
+  h.renderFrame();
+
+  assert.match(h.statuses.get("pi-tab-focus") ?? "", /message 6\/8/);
+  h.input("J");
+  assert.match(h.statuses.get("pi-tab-focus") ?? "", /bash 7\/8/);
+  h.input("J");
+  assert.match(h.statuses.get("pi-tab-focus") ?? "", /custom 8\/8/);
+});
+
+test("gutter tracks header and loaded-resource origin changes from normal renders", () => {
+  const h = createHarness({ initialScrollTop: 0 });
+  h.start();
+  h.input("\t");
+
+  h.transcript.loadedResources.children.push(
+    new FakeText(["resource one"]),
+    new FakeText(["resource two"]),
+    new FakeText(["resource three"]),
+  );
+  h.privateScrollView.scrollTop = 3;
+  h.renderFrame();
+
+  assert.match(h.statuses.get("pi-tab-focus") ?? "", /message 2\/6/);
+  assert.match(h.renderedFirstVisibleLine(h.transcript.reply), /^│/);
+});
+
 test("global config can replace Tab as the transcript focus key", () => {
   const agentDir = mkdtempSync(join(tmpdir(), "pi-tab-focus-agent-"));
   try {
@@ -935,41 +1054,47 @@ test("Ctrl+D shuts down and Ctrl+C returns control to Pi", () => {
   assert.deepEqual(cancel.editorInputs, ["\x03"]);
 });
 
-test("layout-changing Pi actions work in transcript mode and refresh geometry", () => {
+test("layout-changing Pi actions rely on Pi's next render instead of rendering directly", () => {
   const h = createHarness({ initialScrollTop: 0 });
   h.start();
   h.input("\t");
 
   const rendersBefore = h.transcriptRenderCount();
   assert.deepEqual(h.input("\x0f"), { consume: true });
-
   assert.equal(h.toolExpandCalls, 1);
+  assert.equal(h.transcriptRenderCount(), rendersBefore);
+
+  h.renderFrame();
   assert.ok(h.transcriptRenderCount() > rendersBefore);
 
   const rendersBeforeThinking = h.transcriptRenderCount();
   assert.deepEqual(h.input("\x14"), { consume: true });
   assert.equal(h.thinkingToggleCalls, 1);
-  assert.ok(h.transcriptRenderCount() > rendersBeforeThinking);
+  assert.equal(h.transcriptRenderCount(), rendersBeforeThinking);
 
+  h.renderFrame();
+  assert.ok(h.transcriptRenderCount() > rendersBeforeThinking);
   assert.deepEqual(h.editorInputs, []);
   assert.match(h.statuses.get("pi-tab-focus") ?? "", /message 2\/6/);
 });
 
-test("completed message and tool events refresh cached transcript geometry", async () => {
+test("normal Pi renders update message and tool geometry without extension events", () => {
   const h = createHarness({ initialScrollTop: 0 });
   h.start();
   h.input("\t");
 
-  const beforeMessageEnd = h.transcriptRenderCount();
-  h.emit("message_end");
-  await new Promise<void>((resolve) => setTimeout(resolve, 0));
-  const afterMessageEnd = h.transcriptRenderCount();
-  assert.ok(afterMessageEnd > beforeMessageEnd);
+  h.transcript.reply.appendLine(" streamed assistant row");
+  h.renderFrame();
+  h.input("J");
+  assert.match(h.statuses.get("pi-tab-focus") ?? "", /prompt 3\/6/);
+  assert.match(h.renderedFirstVisibleLine(h.transcript.updatePrompt), /^│/);
 
-  h.emit("tool_execution_end");
-  await new Promise<void>((resolve) => setTimeout(resolve, 0));
-  assert.ok(h.transcriptRenderCount() > afterMessageEnd);
-  assert.match(h.renderedFirstVisibleLine(h.transcript.reply), /^│/);
+  h.input("J");
+  h.transcript.glob.appendLine(" finalized tool row");
+  h.renderFrame();
+  h.input("J");
+  assert.match(h.statuses.get("pi-tab-focus") ?? "", /tool 5\/6/);
+  assert.match(h.renderedFirstVisibleLine(h.transcript.edit), /^│/);
 });
 
 test("line scrolling reuses cached transcript rows when auto-selection moves", () => {
@@ -988,55 +1113,65 @@ test("line scrolling reuses cached transcript rows when auto-selection moves", (
   assert.equal(h.transcriptRenderCount(), rendersBeforeScroll);
 });
 
-test("streaming updates defer geometry refresh until auto-selection needs it", () => {
+test("stream observation adds no second transcript render", () => {
   const h = createHarness({ initialScrollTop: 0 });
   h.start();
   h.input("\t");
 
-  const rendersBeforeStreamUpdate = h.transcriptRenderCount();
-  h.emit("message_update");
+  const rendersBeforeFrame = h.transcriptRenderCount();
+  h.appendDoneText(" streamed");
+  h.renderFrame();
+  const rendersAfterFrame = h.transcriptRenderCount();
+
+  // One normal Pi frame renders each tracked transcript component once. The
+  // observer records those results but does not call child.render() itself.
+  assert.equal(rendersAfterFrame - rendersBeforeFrame, 7);
 
   h.input("j");
-  assert.equal(h.transcriptRenderCount(), rendersBeforeStreamUpdate);
-
   h.input("j");
-  h.input("j");
-  h.input("j");
-  assert.ok(h.transcriptRenderCount() > rendersBeforeStreamUpdate);
-  assert.match(h.statuses.get("pi-tab-focus") ?? "", /prompt 3\/6/);
+  assert.equal(h.transcriptRenderCount(), rendersAfterFrame);
 });
 
-test("permanent gutter lives in the fullscreen layout without wrapping transcript renders", () => {
+test("render observation wraps containers but never leaves item renderers wrapped", () => {
   const h = createHarness({ initialScrollTop: 0 });
   h.start();
 
-  // The fullscreen root is replaced with a gutter + scroll-layout composition,
-  // while the transcript container and every item keep their original renderers.
   assert.notEqual(h.layoutRoot, h.originalLayoutRoot);
   assert.equal(
+    Object.prototype.hasOwnProperty.call(h.transcript.document, "render"),
+    true,
+  );
+  assert.equal(
     Object.prototype.hasOwnProperty.call(h.transcript.chat, "render"),
-    false,
-  );
-  assert.equal(
-    Object.prototype.hasOwnProperty.call(h.transcript.reply, "render"),
-    false,
-  );
-  assert.equal(
-    Object.prototype.hasOwnProperty.call(h.transcript.prompt, "render"),
-    false,
-  );
-  assert.equal(
-    Object.prototype.hasOwnProperty.call(h.transcript.glob, "render"),
-    false,
-  );
-  assert.equal(
-    Object.prototype.hasOwnProperty.call(h.transcript.edit, "render"),
-    false,
+    true,
   );
 
-  h.input("\t");
+  for (const component of [
+    h.transcript.reply,
+    h.transcript.prompt,
+    h.transcript.glob,
+    h.transcript.edit,
+  ]) {
+    assert.equal(Object.prototype.hasOwnProperty.call(component, "render"), false);
+  }
+
+  h.input("J");
+  for (const component of [
+    h.transcript.reply,
+    h.transcript.prompt,
+    h.transcript.glob,
+    h.transcript.edit,
+  ]) {
+    assert.equal(Object.prototype.hasOwnProperty.call(component, "render"), false);
+  }
+
+  h.shutdown();
   assert.equal(
-    Object.prototype.hasOwnProperty.call(h.transcript.reply, "render"),
+    Object.prototype.hasOwnProperty.call(h.transcript.document, "render"),
+    false,
+  );
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(h.transcript.chat, "render"),
     false,
   );
 });
@@ -1200,7 +1335,7 @@ test("visual mode sees text appended to a cached streaming line", () => {
   h.input("G");
 
   h.appendDoneText(" streamed");
-  h.emit("message_update");
+  h.renderFrame();
   h.input("$");
 
   assert.ok(h.visualRenderedLine(10).includes("\x1b[7md\x1b[27m"));
