@@ -3,7 +3,7 @@
   "keywords": [
     "pi-package"
   ],
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Crush-style fullscreen transcript focus mode for Pi",
   "license": "ISC",
   "type": "module",
