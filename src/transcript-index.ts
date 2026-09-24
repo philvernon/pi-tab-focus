@@ -42,7 +42,6 @@ type TranscriptEntry = {
 
 type TranscriptContainer = {
   component: ComponentWithChildren;
-  startRow: number;
 };
 
 type TranscriptIndexOptions = {
@@ -143,19 +142,15 @@ function semanticItemBaseKey(
 
 function findTranscriptContainer(
   component: Component,
-  width: number,
-  startRow = 0,
 ): TranscriptContainer | undefined {
   const children = componentChildren(component);
   if (children.some((child) => transcriptItemKind(child) !== undefined)) {
-    return { component: component as ComponentWithChildren, startRow };
+    return { component: component as ComponentWithChildren };
   }
 
-  let childRow = startRow;
   for (const child of children) {
-    const found = findTranscriptContainer(child, width, childRow);
+    const found = findTranscriptContainer(child);
     if (found) return found;
-    childRow += child.render(width).length;
   }
 
   return undefined;
@@ -163,10 +158,9 @@ function findTranscriptContainer(
 
 function findMountedTranscriptContainer(
   roots: Component[],
-  width: number,
 ): TranscriptContainer | undefined {
   for (const root of roots) {
-    const found = findTranscriptContainer(root, width, 0);
+    const found = findTranscriptContainer(root);
     if (found) return found;
   }
 
@@ -177,12 +171,45 @@ function findMountedTranscriptContainer(
   const chat = documentChildren[2];
   if (!chat) return undefined;
 
-  return {
-    component: chat as ComponentWithChildren,
-    startRow:
-      (documentChildren[0]?.render(width).length ?? 0) +
-      (documentChildren[1]?.render(width).length ?? 0),
-  };
+  return { component: chat as ComponentWithChildren };
+}
+
+function containsComponent(component: Component, target: Component): boolean {
+  if (component === target) return true;
+  return componentChildren(component).some((child) =>
+    containsComponent(child, target),
+  );
+}
+
+function componentStartRow(
+  component: Component,
+  target: Component,
+  width: number,
+  startRow = 0,
+): number | undefined {
+  if (component === target) return startRow;
+
+  let row = startRow;
+  for (const child of componentChildren(component)) {
+    if (containsComponent(child, target)) {
+      return componentStartRow(child, target, width, row);
+    }
+    row += child.render(width).length;
+  }
+
+  return undefined;
+}
+
+function mountedComponentStartRow(
+  roots: Component[],
+  target: Component,
+  width: number,
+): number | undefined {
+  for (const root of roots) {
+    if (!containsComponent(root, target)) continue;
+    return componentStartRow(root, target, width, 0);
+  }
+  return undefined;
 }
 
 function isBlankLine(line: string | undefined): boolean {
@@ -205,6 +232,7 @@ export class TranscriptIndex {
   private structureDirty = true;
   private allDirty = true;
   private initialized = false;
+  private transcriptStartRow = 0;
   private contentHeightValue: number | undefined;
 
   constructor(options: TranscriptIndexOptions) {
@@ -239,6 +267,7 @@ export class TranscriptIndex {
     this.structureDirty = true;
     this.allDirty = true;
     this.initialized = false;
+    this.transcriptStartRow = 0;
     this.contentHeightValue = undefined;
   }
 
@@ -278,6 +307,11 @@ export class TranscriptIndex {
 
   items(): TranscriptItem[] {
     if (!this.initialized) return this.refresh();
+
+    const width = this.options.getWidth();
+    if (this.width !== width) return this.refresh();
+    if (this.syncTranscriptStartRow(width)) this.rebuildDerivedState();
+
     return this.itemsCache;
   }
 
@@ -286,7 +320,12 @@ export class TranscriptIndex {
     if (!this.initialized || this.allDirty || this.width !== width) {
       return this.rebuildAll(width);
     }
-    if (!this.needsRefresh) return this.itemsCache;
+
+    const startRowChanged = this.syncTranscriptStartRow(width);
+    if (!this.needsRefresh) {
+      if (startRowChanged) this.rebuildDerivedState();
+      return this.itemsCache;
+    }
 
     let firstChanged = Number.POSITIVE_INFINITY;
 
@@ -307,7 +346,7 @@ export class TranscriptIndex {
       firstChanged = Math.min(firstChanged, index);
     }
 
-    if (Number.isFinite(firstChanged)) {
+    if (startRowChanged || Number.isFinite(firstChanged)) {
       this.rebuildDerivedState();
     }
 
@@ -316,10 +355,8 @@ export class TranscriptIndex {
 
   private rebuildAll(width: number): TranscriptItem[] {
     this.width = width;
-    this.transcript = findMountedTranscriptContainer(
-      this.options.getRoots(),
-      width,
-    );
+    const roots = this.options.getRoots();
+    this.transcript = findMountedTranscriptContainer(roots);
     this.entries = [];
     this.itemsCache = [];
     this.toolEntries.clear();
@@ -327,6 +364,7 @@ export class TranscriptIndex {
     this.latestAssistantEntry = undefined;
 
     if (!this.transcript) {
+      this.transcriptStartRow = 0;
       this.pendingAssistantDirty = false;
       this.pendingToolDirty.clear();
       this.structureDirty = false;
@@ -335,6 +373,9 @@ export class TranscriptIndex {
       this.contentHeightValue = undefined;
       return this.itemsCache;
     }
+
+    this.transcriptStartRow =
+      mountedComponentStartRow(roots, this.transcript.component, width) ?? 0;
 
     for (const component of this.transcript.component.children ?? []) {
       const entry = this.createEntry(component);
@@ -455,8 +496,7 @@ export class TranscriptIndex {
   }
 
   private rebuildDerivedState(): void {
-    const transcriptStartRow = this.transcript?.startRow ?? 0;
-    let row = transcriptStartRow;
+    let row = 0;
 
     this.toolEntries.clear();
     this.latestAssistantEntry = undefined;
@@ -478,7 +518,8 @@ export class TranscriptIndex {
       }
     }
 
-    this.contentHeightValue = row;
+    const transcriptHeight = row;
+    this.contentHeightValue = this.transcriptStartRow + transcriptHeight;
 
     const duplicateKeys = new Map<string, number>();
     const items: TranscriptItem[] = [];
@@ -497,8 +538,10 @@ export class TranscriptIndex {
       duplicateKeys.set(baseKey, occurrence + 1);
       item.semanticKey = `${baseKey}:${occurrence}`;
 
-      const visibleStartRow = entry.startRow + first;
-      const visibleEndRow = entry.startRow + last + 1;
+      const relativeStartRow = entry.startRow + first;
+      const relativeEndRow = entry.startRow + last + 1;
+      const visibleStartRow = this.transcriptStartRow + relativeStartRow;
+      const visibleEndRow = this.transcriptStartRow + relativeEndRow;
       const previousLine =
         first > 0
           ? entry.lines[first - 1]
@@ -511,11 +554,11 @@ export class TranscriptIndex {
       item.startRow = visibleStartRow;
       item.endRow = visibleEndRow;
       item.gutterStartRow =
-        visibleStartRow > transcriptStartRow && isBlankLine(previousLine)
+        relativeStartRow > 0 && isBlankLine(previousLine)
           ? visibleStartRow - 1
           : visibleStartRow;
       item.gutterEndRow =
-        visibleEndRow < row && isBlankLine(nextLine)
+        relativeEndRow < transcriptHeight && isBlankLine(nextLine)
           ? visibleEndRow + 1
           : visibleEndRow;
 
@@ -523,6 +566,23 @@ export class TranscriptIndex {
     }
 
     this.itemsCache = items;
+  }
+
+  private syncTranscriptStartRow(width: number): boolean {
+    const transcript = this.transcript;
+    if (!transcript) return false;
+
+    const startRow = mountedComponentStartRow(
+      this.options.getRoots(),
+      transcript.component,
+      width,
+    );
+    if (startRow === undefined || startRow === this.transcriptStartRow) {
+      return false;
+    }
+
+    this.transcriptStartRow = startRow;
+    return true;
   }
 
   private resolvePendingInvalidations(firstChanged: number): void {

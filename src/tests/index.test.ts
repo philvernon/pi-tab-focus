@@ -190,14 +190,14 @@ function createTranscriptTree(
     done,
     ...extras,
   ]);
-  const document = new FakeContainer([
-    new FakeText(["header"]),
-    new FakeContainer(),
-    chat,
-  ]);
+  const header = new FakeText(["header"]);
+  const loadedResources = new FakeContainer();
+  const document = new FakeContainer([header, loadedResources, chat]);
 
   return {
     document,
+    header,
+    loadedResources,
     chat,
     prompt,
     reply,
@@ -623,6 +623,12 @@ function createHarness(options: HarnessOptions = {}) {
       privateScrollView.contentHeight++;
       return assistant;
     },
+    appendLoadedResourceLine(text: string) {
+      const resource = new FakeText([text]);
+      transcript.loadedResources.children.push(resource);
+      privateScrollView.contentHeight++;
+      return resource;
+    },
     renderedFirstVisibleLine,
     renderedTranscriptLine,
     visualRenderedLine,
@@ -804,6 +810,31 @@ test("Tab selects the bottom visible item and re-entry preserves a visible selec
 
   assert.deepEqual(h.input("\x1b"), { consume: true });
   assert.equal(h.focusedComponent, h.editor);
+});
+
+test("gutter tracks transcript origin changes after startup", () => {
+  const h = createHarness({
+    initialScrollTop: 0,
+    viewportHeight: 8,
+  });
+  h.start();
+  const rendersBeforeResources = h.transcriptRenderCount();
+
+  // Pi populates loaded resources after extension binding. The transcript index
+  // may already exist at this point, so its absolute row origin must stay live.
+  h.appendLoadedResourceLine("resource one");
+  h.appendLoadedResourceLine("resource two");
+  h.appendLoadedResourceLine("resource three");
+
+  h.input("\t");
+  assert.match(h.statuses.get("pi-tab-focus") ?? "", /message 2\/6/);
+  assert.equal(h.transcriptRenderCount(), rendersBeforeResources);
+  assert.match(h.renderedFirstVisibleLine(h.transcript.reply), /^│/);
+
+  const rendersBeforeScroll = h.transcriptRenderCount();
+  h.input("j");
+  assert.equal(h.transcriptRenderCount(), rendersBeforeScroll);
+  assert.match(h.renderedFirstVisibleLine(h.transcript.reply), /^│/);
 });
 
 test("global config can replace Tab as the transcript focus key", () => {
