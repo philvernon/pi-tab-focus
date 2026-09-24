@@ -548,8 +548,8 @@ function createHarness(options: HarnessOptions = {}) {
     );
   };
 
-  const emit = (event: string) => {
-    handlers.get(event)?.({ type: event }, ctx);
+  const emit = (event: string, payload: Record<string, unknown> = {}) => {
+    handlers.get(event)?.({ type: event, ...payload }, ctx);
   };
 
   const renderedTranscriptLine = (component: FakeText): string => {
@@ -616,6 +616,12 @@ function createHarness(options: HarnessOptions = {}) {
     },
     appendDoneText(text: string) {
       transcript.done.appendText(text);
+    },
+    appendAssistant(text: string) {
+      const assistant = new AssistantMessageComponent(text);
+      transcript.chat.children.push(assistant);
+      privateScrollView.contentHeight++;
+      return assistant;
     },
     renderedFirstVisibleLine,
     renderedTranscriptLine,
@@ -966,7 +972,7 @@ test("completed message and tool events refresh cached transcript geometry", asy
   const afterMessageEnd = h.transcriptRenderCount();
   assert.ok(afterMessageEnd > beforeMessageEnd);
 
-  h.emit("tool_execution_end");
+  h.emit("tool_execution_end", { toolCallId: "tool-edit" });
   await new Promise<void>((resolve) => setTimeout(resolve, 0));
   assert.ok(h.transcriptRenderCount() > afterMessageEnd);
   assert.match(h.renderedFirstVisibleLine(h.transcript.reply), /^│/);
@@ -986,6 +992,86 @@ test("line scrolling reuses cached transcript rows when auto-selection moves", (
   h.input("j");
   assert.match(h.statuses.get("pi-tab-focus") ?? "", /prompt 3\/6/);
   assert.equal(h.transcriptRenderCount(), rendersBeforeScroll);
+});
+
+test("item navigation does not rerender a stable transcript", () => {
+  const h = createHarness({ initialScrollTop: 0 });
+  h.start();
+  h.input("\t");
+
+  const rendersBeforeNavigation = h.transcriptRenderCount();
+  h.input("J");
+  h.input("J");
+  h.input("K");
+
+  assert.equal(h.transcriptRenderCount(), rendersBeforeNavigation);
+});
+
+test("streaming message refresh rerenders only the active assistant item", () => {
+  const h = createHarness({ initialScrollTop: 0 });
+  h.start();
+  h.input("\t");
+
+  const promptBefore = h.transcript.prompt.renderCount;
+  const replyBefore = h.transcript.reply.renderCount;
+  const updatePromptBefore = h.transcript.updatePrompt.renderCount;
+  const globBefore = h.transcript.glob.renderCount;
+  const editBefore = h.transcript.edit.renderCount;
+  const doneBefore = h.transcript.done.renderCount;
+
+  h.emit("message_update");
+  h.input("J");
+
+  assert.equal(h.transcript.prompt.renderCount, promptBefore);
+  assert.equal(h.transcript.reply.renderCount, replyBefore);
+  assert.equal(h.transcript.updatePrompt.renderCount, updatePromptBefore);
+  assert.equal(h.transcript.glob.renderCount, globBefore);
+  assert.equal(h.transcript.edit.renderCount, editBefore);
+  assert.equal(h.transcript.done.renderCount, doneBefore + 1);
+});
+
+test("tool refresh rerenders only the targeted tool item", () => {
+  const h = createHarness({ initialScrollTop: 0 });
+  h.start();
+  h.input("\t");
+
+  const promptBefore = h.transcript.prompt.renderCount;
+  const replyBefore = h.transcript.reply.renderCount;
+  const globBefore = h.transcript.glob.renderCount;
+  const editBefore = h.transcript.edit.renderCount;
+  const doneBefore = h.transcript.done.renderCount;
+
+  h.emit("tool_execution_update", { toolCallId: "tool-glob" });
+  h.input("J");
+
+  assert.equal(h.transcript.prompt.renderCount, promptBefore);
+  assert.equal(h.transcript.reply.renderCount, replyBefore);
+  assert.equal(h.transcript.glob.renderCount, globBefore + 1);
+  assert.equal(h.transcript.edit.renderCount, editBefore);
+  assert.equal(h.transcript.done.renderCount, doneBefore);
+});
+
+test("appending a streaming item renders only the new component", () => {
+  const h = createHarness({ initialScrollTop: 0 });
+  h.start();
+  h.input("\t");
+
+  const promptBefore = h.transcript.prompt.renderCount;
+  const replyBefore = h.transcript.reply.renderCount;
+  const globBefore = h.transcript.glob.renderCount;
+  const doneBefore = h.transcript.done.renderCount;
+  const streamed = h.appendAssistant("new streamed response");
+
+  h.emit("message_start");
+  h.emit("message_update");
+  h.input("J");
+
+  assert.equal(h.transcript.prompt.renderCount, promptBefore);
+  assert.equal(h.transcript.reply.renderCount, replyBefore);
+  assert.equal(h.transcript.glob.renderCount, globBefore);
+  assert.equal(h.transcript.done.renderCount, doneBefore);
+  assert.equal(streamed.renderCount, 1);
+  assert.match(h.statuses.get("pi-tab-focus") ?? "", /\/7/);
 });
 
 test("streaming updates defer geometry refresh until auto-selection needs it", () => {

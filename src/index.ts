@@ -11,7 +11,6 @@ import {
   matchesKey,
   stripTerminalSequences,
   visibleWidth,
-  type Component,
   type EditorComponent,
 } from "@earendil-works/pi-tui";
 import { resolveConfig } from "./config.ts";
@@ -27,6 +26,10 @@ import {
   firstTranscriptLink,
   transcriptLinkAtColumn,
 } from "./transcript-links.ts";
+import {
+  TranscriptIndex,
+  type TranscriptItem,
+} from "./transcript-index.ts";
 import {
   VimVisualNavigation,
   compareVimPoints,
@@ -47,31 +50,6 @@ type AppKeybindings = {
 
 type ClipboardWriter = (text: string) => Promise<void>;
 
-type ComponentWithChildren = Component & {
-  children?: Component[];
-};
-
-type TranscriptItemKind =
-  | "prompt"
-  | "message"
-  | "tool"
-  | "bash"
-  | "skill"
-  | "summary"
-  | "custom";
-
-type TranscriptItem = {
-  key: string;
-  semanticKey: string;
-  kind: TranscriptItemKind;
-  startRow: number;
-  endRow: number;
-  gutterStartRow: number;
-  gutterEndRow: number;
-  text: string;
-  linkSourceLines: string[];
-};
-
 const GRAPHEME_SEGMENTER = new Intl.Segmenter(undefined, {
   granularity: "grapheme",
 });
@@ -80,145 +58,6 @@ const TRANSCRIPT_LAYOUT_ACTIONS = [
   "app.thinking.toggle",
 ] as const;
 
-const TRANSCRIPT_COMPONENT_KINDS: Record<string, TranscriptItemKind> = {
-  UserMessageComponent: "prompt",
-  AssistantMessageComponent: "message",
-  ToolExecutionComponent: "tool",
-  BashExecutionComponent: "bash",
-  SkillInvocationMessageComponent: "skill",
-  CompactionSummaryMessageComponent: "summary",
-  BranchSummaryMessageComponent: "summary",
-  CustomMessageComponent: "custom",
-  CustomEntryComponent: "custom",
-};
-
-function componentName(component: Component): string {
-  return (
-    (component as { constructor?: { name?: string } }).constructor?.name ?? ""
-  );
-}
-
-function transcriptItemKind(
-  component: Component,
-): TranscriptItemKind | undefined {
-  return TRANSCRIPT_COMPONENT_KINDS[componentName(component)];
-}
-
-function componentChildren(component: Component): Component[] {
-  const children = (component as ComponentWithChildren).children;
-  return Array.isArray(children) ? children : [];
-}
-
-function trimRenderedText(lines: string[]): string {
-  const textLines = lines.map((line) =>
-    stripTerminalSequences(line).replace(/\s+$/u, ""),
-  );
-
-  while (textLines.length > 0 && textLines[0].trim().length === 0)
-    textLines.shift();
-  while (
-    textLines.length > 0 &&
-    textLines[textLines.length - 1].trim().length === 0
-  ) {
-    textLines.pop();
-  }
-
-  const indents = textLines
-    .filter((line) => line.trim().length > 0)
-    .map((line) => line.match(/^\s*/u)?.[0].length ?? 0);
-  const commonIndent = indents.length > 0 ? Math.min(...indents) : 0;
-
-  return textLines.map((line) => line.slice(commonIndent)).join("\n");
-}
-
-function visibleLineBounds(
-  lines: string[],
-): { first: number; last: number } | undefined {
-  let first = -1;
-  let last = -1;
-
-  for (let index = 0; index < lines.length; index++) {
-    if (stripTerminalSequences(lines[index] ?? "").trim().length === 0)
-      continue;
-    if (first < 0) first = index;
-    last = index;
-  }
-
-  return first < 0 ? undefined : { first, last };
-}
-
-function hashText(text: string): string {
-  let hash = 2166136261;
-  for (let index = 0; index < text.length; index++) {
-    hash ^= text.charCodeAt(index);
-    hash = Math.imul(hash, 16777619);
-  }
-  return (hash >>> 0).toString(36);
-}
-
-function semanticItemBaseKey(
-  component: Component,
-  kind: TranscriptItemKind,
-  text: string,
-): string {
-  if (kind === "tool") {
-    const toolCallId = (component as { toolCallId?: unknown }).toolCallId;
-    if (typeof toolCallId === "string" && toolCallId.length > 0)
-      return `tool:${toolCallId}`;
-  }
-
-  return `${kind}:${hashText(text)}`;
-}
-
-function findTranscriptContainer(
-  component: Component,
-  width: number,
-  startRow = 0,
-): { component: ComponentWithChildren; startRow: number } | undefined {
-  const children = componentChildren(component);
-  if (children.some((child) => transcriptItemKind(child) !== undefined)) {
-    return { component: component as ComponentWithChildren, startRow };
-  }
-
-  let childRow = startRow;
-  for (const child of children) {
-    const found = findTranscriptContainer(child, width, childRow);
-    if (found) return found;
-    childRow += child.render(width).length;
-  }
-
-  return undefined;
-}
-
-function findMountedTranscriptContainer(
-  roots: Component[],
-  width: number,
-): { component: ComponentWithChildren; startRow: number } | undefined {
-  for (const root of roots) {
-    const found = findTranscriptContainer(root, width, 0);
-    if (found) return found;
-  }
-
-  // Pi mounts documentContainer as the first TUI child with
-  // [headerContainer, loadedResourcesContainer, chatContainer]. During
-  // session_start the chat container can still be empty, so semantic discovery
-  // cannot find it yet. Use that stable mounted shape as a guarded fallback for
-  // early transcript-item discovery.
-  const document = roots[0];
-  if (!document) return undefined;
-
-  const documentChildren = componentChildren(document);
-  const chat = documentChildren[2];
-  if (!chat) return undefined;
-
-  return {
-    component: chat as ComponentWithChildren,
-    startRow:
-      (documentChildren[0]?.render(width).length ?? 0) +
-      (documentChildren[1]?.render(width).length ?? 0),
-  };
-}
-
 export default function transcriptFocus(
   pi: ExtensionAPI,
   writeClipboard: ClipboardWriter = copyToClipboard,
@@ -226,16 +65,40 @@ export default function transcriptFocus(
 ): void {
   let cleanupSession: (() => void) | undefined;
   let refreshActiveTranscript: (() => void) | undefined;
-  let markActiveTranscriptGeometryDirty: (() => void) | undefined;
+  let markActiveTranscriptStructureDirty: (() => void) | undefined;
+  let markActiveTranscriptMessageDirty: (() => void) | undefined;
+  let markActiveTranscriptToolDirty: ((toolCallId: string) => void) | undefined;
 
   const scheduleTranscriptRefresh = (): void => {
     setTimeout(() => refreshActiveTranscript?.(), 0);
   };
 
-  pi.on("message_update", () => markActiveTranscriptGeometryDirty?.());
-  pi.on("tool_execution_update", () => markActiveTranscriptGeometryDirty?.());
-  pi.on("message_end", scheduleTranscriptRefresh);
-  pi.on("tool_execution_end", scheduleTranscriptRefresh);
+  pi.on("message_start", () => markActiveTranscriptStructureDirty?.());
+  pi.on("message_update", (event) => {
+    markActiveTranscriptMessageDirty?.();
+    if (!event.message || event.message.role !== "assistant") return;
+    for (const content of event.message.content) {
+      if (content.type === "toolCall") {
+        markActiveTranscriptToolDirty?.(content.id);
+      }
+    }
+  });
+  pi.on("message_end", (event) => {
+    if (!event.message || event.message.role === "assistant") {
+      markActiveTranscriptMessageDirty?.();
+    }
+    scheduleTranscriptRefresh();
+  });
+  pi.on("tool_execution_start", (event) =>
+    markActiveTranscriptToolDirty?.(event.toolCallId),
+  );
+  pi.on("tool_execution_update", (event) =>
+    markActiveTranscriptToolDirty?.(event.toolCallId),
+  );
+  pi.on("tool_execution_end", (event) => {
+    markActiveTranscriptToolDirty?.(event.toolCallId);
+    scheduleTranscriptRefresh();
+  });
 
   pi.on("session_shutdown", () => {
     cleanupSession?.();
@@ -261,15 +124,11 @@ export default function transcriptFocus(
     let focused = false;
     let selectedKey: string | undefined;
     let selectedSemanticKey: string | undefined;
-    let transcriptItemsCache: TranscriptItem[] | undefined;
-    let transcriptContentHeight: number | undefined;
-    let transcriptGeometryDirty = false;
     let fullscreenLayout: FullscreenLayoutController;
+    let transcriptIndex: TranscriptIndex;
     let restoreEditorBorderStyle: (() => void) | undefined;
     let visualSourceRevision = 0;
     const visualLineCache = new Map<number, VimCell[]>();
-    const componentKeys = new WeakMap<object, string>();
-    let nextComponentKey = 1;
     let exDetour = false;
     let exReturnArmed = false;
     let exReturnCheck: ReturnType<typeof setTimeout> | undefined;
@@ -326,7 +185,7 @@ export default function transcriptFocus(
       const contentHeight = activeScrollView()?.contentHeight;
       return typeof contentHeight === "number" && contentHeight > 0
         ? contentHeight
-        : transcriptContentHeight;
+        : transcriptIndex?.contentHeight;
     };
 
     const clampRow = (row: number): number => {
@@ -364,10 +223,14 @@ export default function transcriptFocus(
       isSelecting: () => isVisualSelecting(),
       hideDefaultScrollIndicator,
       onIntegrationInvalidated: () => {
-        transcriptItemsCache = undefined;
-        transcriptContentHeight = undefined;
+        transcriptIndex?.reset();
         invalidateVisualSource();
       },
+    });
+
+    transcriptIndex = new TranscriptIndex({
+      getRoots: () => tui?.children ?? [],
+      getWidth: transcriptWidth,
     });
 
     const graphemeEndPoint = (point: VimPoint): NativeSelectionPoint => {
@@ -400,126 +263,27 @@ export default function transcriptFocus(
       };
     };
 
-    const componentKey = (
-      component: Component,
-      kind: TranscriptItemKind,
-    ): string => {
-      if (kind === "tool") {
-        const toolCallId = (component as { toolCallId?: unknown }).toolCallId;
-        if (typeof toolCallId === "string" && toolCallId.length > 0)
-          return `tool:${toolCallId}`;
-      }
+    const refreshTranscriptItems = (): TranscriptItem[] =>
+      transcriptIndex.refresh();
 
-      const object = component as object;
-      let key = componentKeys.get(object);
-      if (!key) {
-        key = `${kind}:component:${nextComponentKey++}`;
-        componentKeys.set(object, key);
-      }
-      return key;
-    };
+    const transcriptItems = (): TranscriptItem[] => transcriptIndex.items();
 
-    const refreshTranscriptItems = (): TranscriptItem[] => {
-      transcriptGeometryDirty = false;
-      invalidateVisualSource();
-      if (!tui) {
-        transcriptContentHeight = undefined;
-        transcriptItemsCache = [];
-        return transcriptItemsCache;
-      }
-
-      const width = transcriptWidth();
-      const transcript = findMountedTranscriptContainer(tui.children, width);
-
-      if (!transcript) {
-        transcriptContentHeight = undefined;
-        fullscreenLayout.setSelection(undefined);
-        transcriptItemsCache = [];
-        return transcriptItemsCache;
-      }
-
-      const items: TranscriptItem[] = [];
-      const duplicateKeys = new Map<string, number>();
-      const renderedChildren: Array<{
-        child: Component;
-        kind: TranscriptItemKind | undefined;
-        lines: string[];
-        startRow: number;
-      }> = [];
-      let localRow = 0;
-
-      for (const child of transcript.component.children ?? []) {
-        const lines = child.render(width);
-        renderedChildren.push({
-          child,
-          kind: transcriptItemKind(child),
-          lines,
-          startRow: localRow,
-        });
-        localRow += lines.length;
-      }
-
-      transcriptContentHeight = localRow + transcript.startRow;
-
-      const transcriptLines = renderedChildren.flatMap(({ lines }) => lines);
-      const isBlankLine = (line: string | undefined): boolean =>
-        line !== undefined && stripTerminalSequences(line).trim().length === 0;
-
-      for (const {
-        child,
-        kind,
-        lines,
-        startRow: childStartRow,
-      } of renderedChildren) {
-        const bounds = kind ? visibleLineBounds(lines) : undefined;
-        if (!kind || !bounds) continue;
-
-        const text = trimRenderedText(lines);
-        const baseKey = semanticItemBaseKey(child, kind, text);
-        const occurrence = duplicateKeys.get(baseKey) ?? 0;
-        duplicateKeys.set(baseKey, occurrence + 1);
-
-        const visibleStartRow = childStartRow + bounds.first;
-        const visibleEndRow = childStartRow + bounds.last + 1;
-        const gutterStartRow =
-          visibleStartRow > 0 &&
-            isBlankLine(transcriptLines[visibleStartRow - 1])
-            ? visibleStartRow - 1
-            : visibleStartRow;
-        const gutterEndRow =
-          visibleEndRow < transcriptLines.length &&
-            isBlankLine(transcriptLines[visibleEndRow])
-            ? visibleEndRow + 1
-            : visibleEndRow;
-
-        items.push({
-          key: componentKey(child, kind),
-          semanticKey: `${baseKey}:${occurrence}`,
-          kind,
-          startRow: transcript.startRow + visibleStartRow,
-          endRow: transcript.startRow + visibleEndRow,
-          // Navigation stays anchored to visible content. The gutter absorbs at
-          // most one adjacent blank transcript row above and below, regardless
-          // of whether Pi owns that spacing inside or outside the component.
-          gutterStartRow: transcript.startRow + gutterStartRow,
-          gutterEndRow: transcript.startRow + gutterEndRow,
-          text,
-          linkSourceLines: lines,
-        });
-      }
-
-      transcriptItemsCache = items;
-      return items;
-    };
-
-    const transcriptItems = (): TranscriptItem[] =>
-      transcriptItemsCache ?? refreshTranscriptItems();
-
-    const markTranscriptGeometryDirty = (): void => {
-      transcriptGeometryDirty = true;
+    const markTranscriptStructureDirty = (): void => {
+      transcriptIndex.invalidateStructure();
       if (inVisualMode()) invalidateVisualSource();
     };
-    markActiveTranscriptGeometryDirty = markTranscriptGeometryDirty;
+    const markTranscriptMessageDirty = (): void => {
+      transcriptIndex.invalidateAssistant();
+      if (inVisualMode()) invalidateVisualSource();
+    };
+    const markTranscriptToolDirty = (toolCallId: string): void => {
+      transcriptIndex.invalidateTool(toolCallId);
+      if (inVisualMode()) invalidateVisualSource();
+    };
+
+    markActiveTranscriptStructureDirty = markTranscriptStructureDirty;
+    markActiveTranscriptMessageDirty = markTranscriptMessageDirty;
+    markActiveTranscriptToolDirty = markTranscriptToolDirty;
 
     const showSelection = (item: TranscriptItem): void => {
       fullscreenLayout.setSelection(item);
@@ -622,7 +386,9 @@ export default function transcriptFocus(
     const syncSelectionToVisualHead = (direction: -1 | 1): void => {
       const head = visualSnapshot()?.head;
       if (!head) return;
-      const items = transcriptItems();
+      const items = transcriptIndex.needsRefresh
+        ? refreshTranscriptItems()
+        : transcriptItems();
       const row = head.row;
       const direct = items.find(
         (item) => row >= item.startRow && row < item.endRow,
@@ -668,7 +434,10 @@ export default function transcriptFocus(
       visualWidth = undefined;
       clearNativeTextSelection();
       if (options.restoreGutter) {
-        const selected = selectedItemFrom(transcriptItems());
+        const items = transcriptIndex.needsRefresh
+          ? refreshTranscriptItems()
+          : transcriptItems();
+        const selected = selectedItemFrom(items);
         if (selected && focused) showSelection(selected);
       } else {
         fullscreenLayout.setSelection(undefined);
@@ -679,7 +448,6 @@ export default function transcriptFocus(
 
     const refreshSelectionGeometry = (): void => {
       reconcileFullscreenMode();
-      transcriptItemsCache = undefined;
       if (tui?.mode !== "fullscreen" || (!focused && !exDetour)) return;
 
       const items = refreshTranscriptItems();
@@ -874,9 +642,9 @@ export default function transcriptFocus(
       if (current && itemIsVisible(current, bounds)) return;
 
       // Stable transcripts reuse cached geometry even when auto-selection moves.
-      // While output is actively streaming, refresh only when stale geometry
-      // actually reaches a selection boundary.
-      if (transcriptGeometryDirty) {
+      // Streaming/layout updates only refresh the affected cached entries when
+      // stale geometry actually reaches a selection boundary.
+      if (transcriptIndex.needsRefresh) {
         items = refreshTranscriptItems();
         current = selectedItemFrom(items);
         if (current && itemIsVisible(current, bounds)) return;
@@ -947,7 +715,9 @@ export default function transcriptFocus(
     };
 
     const selectItem = (direction: -1 | 1): void => {
-      const items = refreshTranscriptItems();
+      const items = transcriptIndex.needsRefresh
+        ? refreshTranscriptItems()
+        : transcriptItems();
       if (items.length === 0) {
         clearSelection();
         updateStatus();
@@ -975,7 +745,9 @@ export default function transcriptFocus(
     };
 
     const copySelectedItem = (): void => {
-      const items = refreshTranscriptItems();
+      const items = transcriptIndex.needsRefresh
+        ? refreshTranscriptItems()
+        : transcriptItems();
       if (items.length === 0) {
         ctx.ui.notify("No selectable transcript item.", "warning");
         return;
@@ -1013,7 +785,9 @@ export default function transcriptFocus(
     };
 
     const selectedVisualStartPoint = (): VimPoint | undefined => {
-      const items = refreshTranscriptItems();
+      const items = transcriptIndex.needsRefresh
+        ? refreshTranscriptItems()
+        : transcriptItems();
       const selected = selectedItemFrom(items) ?? items[items.length - 1];
       if (!selected) {
         ctx.ui.notify("No selectable transcript item.", "warning");
@@ -1095,7 +869,10 @@ export default function transcriptFocus(
     };
 
     const openSelectedItemLink = (): void => {
-      const selected = selectedItemFrom(transcriptItems());
+      const items = transcriptIndex.needsRefresh
+        ? refreshTranscriptItems()
+        : transcriptItems();
+      const selected = selectedItemFrom(items);
       const url = selected ? firstTranscriptLink(selected.linkSourceLines) : undefined;
       if (!url) {
         ctx.ui.notify("No link found in selected transcript item.", "info");
@@ -1260,6 +1037,8 @@ export default function transcriptFocus(
           const handler = editor?.actionHandlers?.get(transcriptLayoutAction);
           if (handler) handler();
           else editor?.handleInput(data);
+          transcriptIndex.invalidateAll();
+          invalidateVisualSource();
           refreshSelectionGeometry();
         }
         return { consume: true };
@@ -1397,8 +1176,7 @@ export default function transcriptFocus(
       exReturnArmed = false;
       if (inVisualMode()) finishVisualMode({ restoreGutter: false });
       clearSelection();
-      transcriptItemsCache = undefined;
-      transcriptContentHeight = undefined;
+      transcriptIndex.reset();
       fullscreenLayout.restore();
       restoreEditorBorderStyle?.();
       restoreEditorBorderStyle = undefined;
@@ -1406,8 +1184,12 @@ export default function transcriptFocus(
       ctx.ui.setEditorComponent(previousFactory);
       if (refreshActiveTranscript === refreshSelectionGeometry)
         refreshActiveTranscript = undefined;
-      if (markActiveTranscriptGeometryDirty === markTranscriptGeometryDirty)
-        markActiveTranscriptGeometryDirty = undefined;
+      if (markActiveTranscriptStructureDirty === markTranscriptStructureDirty)
+        markActiveTranscriptStructureDirty = undefined;
+      if (markActiveTranscriptMessageDirty === markTranscriptMessageDirty)
+        markActiveTranscriptMessageDirty = undefined;
+      if (markActiveTranscriptToolDirty === markTranscriptToolDirty)
+        markActiveTranscriptToolDirty = undefined;
 
       ctx.ui.setStatus("pi-tab-focus", undefined);
       focused = false;
