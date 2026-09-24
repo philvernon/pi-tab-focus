@@ -5,13 +5,8 @@ import {
   type ExtensionAPI,
 } from "@earendil-works/pi-coding-agent";
 import {
-  Key,
-  isKeyRelease,
-  isKeyRepeat,
-  matchesKey,
   stripTerminalSequences,
   visibleWidth,
-  type EditorComponent,
 } from "@earendil-works/pi-tui";
 import { resolveConfig } from "./config.ts";
 import {
@@ -22,6 +17,12 @@ import {
   type PrivateScrollView,
 } from "./fullscreen-layout.ts";
 import { installTranscriptEditorBorderStyle } from "./fullscreen-ui.ts";
+import {
+  createTranscriptInputHandler,
+  normalizeVisualKey,
+  type AppKeybindings,
+  type TranscriptEditor,
+} from "./transcript-input.ts";
 import {
   firstTranscriptLink,
   transcriptLinkAtColumn,
@@ -40,24 +41,11 @@ import {
   type VimTextSource,
 } from "./vim-navigation.ts";
 
-type TranscriptEditor = EditorComponent & {
-  getMode?: () => string;
-  actionHandlers?: Map<string, () => void>;
-};
-
-type AppKeybindings = {
-  matches?: (data: string, keybinding: string) => boolean;
-};
-
 type ClipboardWriter = (text: string) => Promise<void>;
 
 const GRAPHEME_SEGMENTER = new Intl.Segmenter(undefined, {
   granularity: "grapheme",
 });
-const TRANSCRIPT_LAYOUT_ACTIONS = [
-  "app.tools.expand",
-  "app.thinking.toggle",
-] as const;
 
 export default function transcriptFocus(
   pi: ExtensionAPI,
@@ -113,7 +101,6 @@ export default function transcriptFocus(
     const visualSnapshot = () => visualNavigation?.snapshot();
     const supportsExCommands = (): boolean =>
       typeof editor?.getMode === "function";
-    const matchesFocusKey = (data: string): boolean => matchesKey(data, focusKey);
 
     const transientUiHasFocus = (): boolean => {
       const active = tui?.getFocusedComponent?.();
@@ -837,18 +824,6 @@ export default function transcriptFocus(
       editor.handleInput(":");
     };
 
-    const normalizeVisualKey = (data: string): string => {
-      if (matchesKey(data, Key.escape) || matchesKey(data, "ctrl+["))
-        return "escape";
-      if (matchesKey(data, Key.enter)) return "enter";
-      if (matchesKey(data, Key.left)) return "h";
-      if (matchesKey(data, Key.right)) return "l";
-      if (matchesKey(data, Key.up)) return "k";
-      if (matchesKey(data, Key.down)) return "j";
-      if (data === ":" || matchesKey(data, Key.colon)) return ":";
-      return data;
-    };
-
     const handleVisualInput = (data: string): boolean => {
       if (!visualNavigation || !ensureVisualWidth()) return false;
 
@@ -912,202 +887,39 @@ export default function transcriptFocus(
 
     // Transcript focus is an input mode, not an editor implementation. Handle it
     // before input reaches the editor and consume only keys owned by transcript mode.
-    const unsubscribeTerminalInput = ctx.ui.onTerminalInput((data) => {
-      // Pi can replace the active renderer at runtime without rebuilding the
-      // custom editor. Reconcile cached fullscreen integration before touching
-      // focus, viewport or selection state for this input event.
-      reconcileFullscreenMode();
-
-      // When another Pi/custom component has actual TUI focus, it owns input.
-      // This covers select/confirm/input/editor prompts and capturing overlays.
-      if (transientUiHasFocus()) {
-        if (exDetour) checkExReturnAfterInput();
-        return undefined;
-      }
-
-      // Pi restores editor focus when a transient component closes. Transcript
-      // mode is logically still active, so reclaim its normal null-focus state.
-      if (!exDetour) reclaimTranscriptFocus();
-
-
-      // Raw input listeners run before Pi filters key-release events.
-      if (isKeyRelease(data)) return undefined;
-
-      // When pi-vim is present, `:` is a temporary detour into its EX mini-mode.
-      // While it is active, let the editor/Pi own input normally. Enter or Escape
-      // ends EX input; if the command opens an overlay, subsequent overlay input
-      // keeps checking until Pi restores focus to the editor, then transcript
-      // mode resumes.
-      if (exDetour) {
-        // The configured focus key keeps its transcript-focus meaning while the
-        // EX mini-mode is active. Cancel EX and return to transcript navigation.
-        if (matchesFocusKey(data)) {
-          if (!isKeyRepeat(data)) {
-            editor?.handleInput("\x1b");
-            finishExDetour();
-          }
-          return { consume: true };
-        }
-
-        if (
-          matchesKey(data, Key.enter) ||
-          matchesKey(data, Key.escape) ||
-          matchesKey(data, "ctrl+[")
-        ) {
+    const unsubscribeTerminalInput = ctx.ui.onTerminalInput(
+      createTranscriptInputHandler({
+        focusKey,
+        getTui: () => tui,
+        getEditor: () => editor,
+        getAppKeybindings: () => appKeybindings,
+        isFocused: () => focused,
+        isExDetour: () => exDetour,
+        setExReturnArmed: () => {
           exReturnArmed = true;
-        }
-        checkExReturnAfterInput();
-        return undefined;
-      }
-
-      if (matchesFocusKey(data)) {
-        // Outside fullscreen, the configured focus key belongs entirely to Pi.
-        if (!focused && tui?.mode !== "fullscreen") return undefined;
-
-        // Holding the focus key must not repeatedly flip focus on key-repeat events.
-        if (!isKeyRepeat(data)) {
-          if (inVisualMode()) finishVisualMode({ restoreGutter: false });
-          if (focused) leaveTranscriptMode();
-          else enterTranscriptMode();
-        }
-        return { consume: true };
-      }
-
-      if (!focused) return undefined;
-
-      const transcriptLayoutAction = TRANSCRIPT_LAYOUT_ACTIONS.find((action) =>
-        appKeybindings?.matches?.(data, action),
-      );
-      if (transcriptLayoutAction) {
-        if (!isKeyRepeat(data)) {
-          if (inVisualMode()) finishVisualMode();
-          const handler = editor?.actionHandlers?.get(transcriptLayoutAction);
-          if (handler) handler();
-          else editor?.handleInput(data);
-          refreshSelectionGeometry();
-        }
-        return { consume: true };
-      }
-
-      if (matchesKey(data, "ctrl+d")) {
-        ctx.shutdown();
-        return { consume: true };
-      }
-
-      // Leave transcript focus on Ctrl+C; once the editor owns focus again,
-      // subsequent Ctrl+C input follows Pi's normal handling.
-      if (matchesKey(data, "ctrl+c")) {
-        if (inVisualMode()) finishVisualMode({ restoreGutter: false });
-        leaveTranscriptMode();
-        return { consume: true };
-      }
-
-      if (inVisualMode()) {
-        return handleVisualInput(data) ? { consume: true } : undefined;
-      }
-
-      if (matchesKey(data, Key.escape)) {
-        leaveTranscriptMode();
-        return { consume: true };
-      }
-
-      if (data === "v") {
-        enterVisualMode();
-        return { consume: true };
-      }
-
-      if (data === "V") {
-        enterVisualMode();
-        if (inVisualMode()) handleVisualInput("V");
-        return { consume: true };
-      }
-
-      if (matchesKey(data, Key.enter)) {
-        openSelectedItemLink();
-        return { consume: true };
-      }
-
-      if (data === ":" || matchesKey(data, Key.colon)) {
-        enterExDetour();
-        return { consume: true };
-      }
-
-      if (data === "j" || matchesKey(data, Key.down)) {
-        tui?.scrollBy?.(1);
-        syncSelectionToViewport(1);
-        return { consume: true };
-      }
-
-      if (data === "k" || matchesKey(data, Key.up)) {
-        tui?.scrollBy?.(-1);
-        syncSelectionToViewport(-1);
-        return { consume: true };
-      }
-
-      if (data === "u") {
-        halfPage(-1);
-        syncSelectionToViewport(-1);
-        return { consume: true };
-      }
-
-      if (data === "d") {
-        halfPage(1);
-        syncSelectionToViewport(1);
-        return { consume: true };
-      }
-
-      if (
-        data === "J" ||
-        matchesKey(data, Key.shift("j")) ||
-        matchesKey(data, Key.shift("down"))
-      ) {
-        selectItem(1);
-        return { consume: true };
-      }
-
-      if (
-        data === "K" ||
-        matchesKey(data, Key.shift("k")) ||
-        matchesKey(data, Key.shift("up"))
-      ) {
-        selectItem(-1);
-        return { consume: true };
-      }
-
-      if (data === "b" || matchesKey(data, Key.pageUp)) {
-        page(-1);
-        syncSelectionToViewport(-1);
-        return { consume: true };
-      }
-
-      if (data === "f" || matchesKey(data, Key.pageDown)) {
-        page(1);
-        syncSelectionToViewport(1);
-        return { consume: true };
-      }
-
-      if (data === "g" || matchesKey(data, Key.home)) {
-        tui?.scrollToTop?.();
-        syncSelectionToViewport(-1);
-        return { consume: true };
-      }
-
-      if (data === "G" || matchesKey(data, Key.end)) {
-        tui?.scrollToBottom?.();
-        syncSelectionToViewport(1);
-        return { consume: true };
-      }
-
-      if (data === "y" || data === "c") {
-        copySelectedItem();
-        return { consume: true };
-      }
-
-      // Transcript mode keeps TUI focus at null, so unrecognised input cannot
-      // edit the prompt editor. Leave it unconsumed so other extensions' raw
-      // terminal-input listeners can handle their own shortcuts.
-      return undefined;
-    });
+        },
+        reconcileFullscreenMode,
+        transientUiHasFocus,
+        checkExReturnAfterInput,
+        reclaimTranscriptFocus,
+        finishExDetour,
+        inVisualMode,
+        finishVisualMode,
+        leaveTranscriptMode,
+        enterTranscriptMode,
+        refreshSelectionGeometry,
+        shutdown: () => ctx.shutdown(),
+        handleVisualInput,
+        enterVisualMode,
+        openSelectedItemLink,
+        enterExDetour,
+        syncSelectionToViewport,
+        halfPage,
+        selectItem,
+        page,
+        copySelectedItem,
+      }),
+    );
 
     cleanupSession = () => {
       unsubscribeTerminalInput();
